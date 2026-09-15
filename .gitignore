@@ -1,0 +1,5 @@
+weather.json
+shell.json
+*.log
+*.bak
+.DS_Store
