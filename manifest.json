@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.daniellopez12.just-right-weather",
   "name": "Just Right Weather",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "daniellopez12",
   "license": "MIT",
   "description": "Just enough weather: a scrollable 48-hour forecast, rain chance and amount, sunrise and sunset, and three days ahead.",

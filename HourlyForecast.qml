@@ -126,6 +126,7 @@ Column {
             font.bold: true
           }
           Text {
+            textFormat: Text.PlainText
             anchors.horizontalCenter: parent.horizontalCenter
             y: Style.space(160)
             text: parent.solar ? "" : "\uf043 " + (modelData.probability === null || modelData.probability === undefined

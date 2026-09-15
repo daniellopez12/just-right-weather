@@ -329,13 +329,15 @@ function hourlyForecast(report, nowMs, hours) {
   for (var i = 0; i < hourly.time.length; i++) {
     var time = forecastWallTime(hourly.time[i])
     if (!isFinite(time) || time < start || time >= end) continue
+    var probability = hourly.precipitation_probability ? hourly.precipitation_probability[i] : null
     entries.push({
       kind: "hour",
       time: time,
       date: hourly.time[i].slice(0, 10),
       label: hourLabel(hourly.time[i], false),
       temperature: hourly.temperature_2m[i],
-      probability: hourly.precipitation_probability ? hourly.precipitation_probability[i] : null,
+      probability: typeof probability === "number" && isFinite(probability) && probability >= 0 && probability <= 100
+        ? probability : null,
       precipitation: hourly.precipitation ? hourly.precipitation[i] : null,
       icon: hourly.weather_code && hourly.weather_code[i] !== null
         ? iconForOpenMeteoCode(hourly.weather_code[i], hourly.is_day && hourly.is_day[i] === 0) : ""

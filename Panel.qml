@@ -925,6 +925,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.hasConfiguredCoordinates
           width: parent.width
           text: "Saved: " + root.configuredLocation + "\n"

@@ -147,6 +147,17 @@ disabled the built-in weather widget earlier, restore it with:
 omarchy plugin enable omarchy.weather --section center
 ```
 
+## Security update: 1.0.1
+
+Version 1.0.1 prevents external forecast and location text from being interpreted
+as HTML that could trigger unintended image requests. Rain probability accepts
+only finite numbers between 0 and 100; invalid values display as unavailable.
+Users of 1.0.0 should update:
+
+```sh
+omarchy plugin update io.github.daniellopez12.just-right-weather
+```
+
 ## Development
 
 Keep development in a user-owned folder, never in `/usr/share/omarchy`.

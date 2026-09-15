@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const Model = require("../Model.js");
 
@@ -101,4 +103,50 @@ test("starts without a bundled location and uses generic encoded search", () => 
   assert.equal(Model.coordinateLocation("91, 0"), null);
   assert.equal(Model.coordinateLocation("0, 181"), null);
   assert.equal(Model.locationMapUrl(NaN, 0), "");
+});
+
+test("preserves finite numeric rain probabilities, including zero and 100 percent", () => {
+  const report = forecast();
+  const probabilities = [0, 25, 37.5, 100];
+  report.hourly.precipitation_probability.splice(17, probabilities.length, ...probabilities);
+  const hours = Model.hourlyForecast(report, Date.parse("2030-01-10T22:20:00Z"), 48)
+    .filter(entry => entry.kind === "hour");
+  assert.deepEqual(hours.slice(0, probabilities.length).map(entry => entry.probability), probabilities);
+});
+
+test("rejects markup, non-numeric values, and out-of-range rain probabilities", () => {
+  const report = forecast();
+  const invalid = [
+    '<img src="https://example.invalid/weather.png">',
+    "<b>25</b>", "25", "", null, undefined, true, false, [], {},
+    NaN, Infinity, -Infinity, -1, 101
+  ];
+  report.hourly.precipitation_probability.splice(17, invalid.length, ...invalid);
+  const hours = Model.hourlyForecast(report, Date.parse("2030-01-10T22:20:00Z"), 48)
+    .filter(entry => entry.kind === "hour");
+  assert.equal(hours.length, 48);
+  assert.deepEqual(hours.slice(0, invalid.length).map(entry => entry.probability), invalid.map(() => null));
+  assert.equal(hours[invalid.length].probability, 25);
+});
+
+test("keeps missing rain probability data unavailable rather than displaying zero", () => {
+  const report = forecast();
+  delete report.hourly.precipitation_probability;
+  const hours = Model.hourlyForecast(report, Date.parse("2030-01-10T22:20:00Z"), 48)
+    .filter(entry => entry.kind === "hour");
+  assert.equal(hours.length, 48);
+  assert.ok(hours.every(entry => entry.probability === null));
+});
+
+test("renders external probability and saved-location text only as plain text", () => {
+  for (const [file, binding] of [
+    ["HourlyForecast.qml", "modelData.probability"],
+    ["Panel.qml", 'text: "Saved: "']
+  ]) {
+    const source = fs.readFileSync(path.join(__dirname, "..", file), "utf8");
+    const blocks = Array.from(source.matchAll(/\bText\s*\{([^{}]*)\}/g), match => match[1]);
+    const block = blocks.find(text => text.includes(binding));
+    assert.ok(block, `Expected external-data Text element in ${file}`);
+    assert.match(block, /\btextFormat:\s*Text\.PlainText\b/, `${file} must not interpret external data as HTML`);
+  }
 });
