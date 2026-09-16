@@ -24,7 +24,7 @@ An Omarchy installation with the Quattro shell and `omarchy plugin` commands.
 This is a Quickshell plugin, not a Waybar module.
 
 The plugin uses the shell's `qs.Commons` and `qs.Ui` components, Qt Quick,
-Quickshell I/O, `curl`, and the existing Omarchy commands
+Quickshell I/O, `curl` 8.4.0 or newer, and the existing Omarchy commands
 `omarchy-weather-location`, `omarchy-weather-status`, and
 `omarchy-notification-send`. The location command also uses `jq`. These are
 provided by a normal compatible Omarchy installation.
@@ -133,6 +133,20 @@ positioning backend may use its own network services and permissions.
 Coordinates obtained from it are not sent to the weather providers until you
 select that result.
 
+The four plugin HTTP requests use `curl --max-filesize` to bound response bodies
+before collection: 256 KiB for wttr.in forecasts, 64 KiB for Open-Meteo forecasts
+and city/ZIP searches, and 1 KiB for the IP-detected location label. Their
+timeouts remain 10, 5, 5, and 4 seconds respectively. Curl 8.4.0 or newer is
+required to enforce the limit even without a known content length (including
+chunked responses). The requests ignore `.curlrc` and do not enable automatic
+decompression.
+
+Only successful, normally exited transfers with nonempty, size-checked output
+are processed. Oversized, timed-out, and incomplete transfers are rejected even
+if their partial output is valid JSON or text. Failures are logged; weather
+retains its last good report and existing retry behavior, while failed searches
+show an error without accepting suggestions.
+
 ## Disable or remove
 
 ```sh
@@ -147,12 +161,17 @@ disabled the built-in weather widget earlier, restore it with:
 omarchy plugin enable omarchy.weather --section center
 ```
 
-## Security update: 1.0.1
+## Security updates
 
-Version 1.0.1 prevents external forecast and location text from being interpreted
+Version 1.0.2 caps all four plugin HTTP response bodies before collection and
+rejects failed, oversized, or incomplete transfers before parsing or updating
+the UI. Existing request timeouts and last-good weather data are preserved.
+Curl 8.4.0 or newer is required for unknown-length response limits.
+
+Version 1.0.1 prevented external forecast and location text from being interpreted
 as HTML that could trigger unintended image requests. Rain probability accepts
 only finite numbers between 0 and 100; invalid values display as unavailable.
-Users of 1.0.0 should update:
+Users of 1.0.0 or 1.0.1 should update:
 
 ```sh
 omarchy plugin update io.github.daniellopez12.just-right-weather
@@ -167,12 +186,19 @@ From the repository root:
 omarchy plugin validate .
 qmllint -I "$OMARCHY_PATH/shell" \
   BarWidget.qml Panel.qml HourlyForecast.qml DeviceLocation.qml
-node --test tests/model.test.cjs
+node --test tests/*.test.cjs
 ```
 
 On Arch, `qmllint` may be at `/usr/lib/qt6/bin/qmllint` instead of on `PATH`.
 The optional device-location file requires the Qt Positioning import to lint.
-The model tests use Node's built-in test runner, with no package installation.
+The tests use Node's built-in test runner, with no package installation. Network
+regressions use curl against a loopback HTTP server and synthetic responses;
+they do not contact weather providers.
+
+The native end-to-end suite additionally requires Linux, Quickshell, Python 3,
+and Qt's offscreen platform plugin. It runs the complete panel against isolated
+test services, without changing your desktop or saved location. See
+[native QML regression coverage and prerequisites](tests/e2e/README.md).
 
 Follow the [Omarchy development guide](https://plugins.omarchy.org/develop.html)
 and [publishing guide](https://plugins.omarchy.org/publish.html).

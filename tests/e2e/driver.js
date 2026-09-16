@@ -1,0 +1,398 @@
+var h
+
+function check(condition, message) {
+    if (!condition) throw new Error(message)
+    h.assertions++
+}
+
+function fail(harness, message) {
+    harness.finished = true
+    console.error("WEATHER_E2E_FAIL " + harness.scenario + ": " + message)
+    Qt.quit()
+}
+
+function tick(harness) {
+    if (harness.finished || !harness.steps.length) return
+    var step = harness.steps[harness.stepIndex]
+    if (!harness.stepStarted) harness.stepStarted = Date.now()
+    try {
+        if (step.run) {
+            step.run()
+        } else if (!step.until()) {
+            if (Date.now() - harness.stepStarted > (step.timeout || 6000))
+                throw new Error("Timed out: " + step.name)
+            return
+        }
+        harness.stepIndex++
+        harness.stepStarted = 0
+        if (harness.stepIndex === harness.steps.length) {
+            harness.finished = true
+            console.log("WEATHER_E2E_PASS " + harness.scenario + " " + harness.assertions + " assertions")
+            Qt.quit()
+        }
+    } catch (error) {
+        fail(harness, step.name + ": " + error)
+    }
+}
+
+function action(name, run) { h.steps.push({ name: name, run: run }) }
+function until(name, predicate, timeout) { h.steps.push({ name: name, until: predicate, timeout: timeout || 6000 }) }
+function pause(milliseconds) {
+    until("wait " + milliseconds + "ms", function() { return Date.now() - h.stepStarted >= milliseconds }, milliseconds + 1000)
+}
+
+function control(options) {
+    action("configure loopback response plan", function() {
+        h.controlled = false
+        var request = new XMLHttpRequest()
+        request.open("POST", h.server + "/control")
+        request.setRequestHeader("Content-Type", "application/json")
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE) return
+            if (request.status !== 200) return fail(h, "loopback control failed")
+            h.stats = JSON.parse(request.responseText)
+            h.controlled = true
+        }
+        request.send(JSON.stringify(options))
+    })
+    until("loopback plan acknowledgement", function() { return h.controlled })
+}
+
+function waitForRequests(tag, counts, timeout) {
+    var pending = false
+    var matched = false
+    until("native request counts for " + tag, function() {
+        if (matched) return networkIdle()
+        if (!pending) {
+            pending = true
+            var request = new XMLHttpRequest()
+            request.open("POST", h.server + "/control")
+            request.setRequestHeader("Content-Type", "application/json")
+            request.onreadystatechange = function() {
+                if (request.readyState !== XMLHttpRequest.DONE) return
+                if (request.status !== 200) return fail(h, "request counter failed")
+                h.stats = JSON.parse(request.responseText)
+                matched = Object.keys(counts).every(function(kind) {
+                    return h.stats.requests.filter(function(record) { return record.tag === tag && record.kind === kind }).length >= counts[kind]
+                })
+                pending = false
+            }
+            request.send('{"inspect":true}')
+        }
+        return false
+    }, timeout)
+}
+
+function descendants(item, predicate, matches) {
+    matches = matches || []
+    if (predicate(item)) matches.push(item)
+    if (item.children) {
+        for (var i = 0; i < item.children.length; i++)
+            descendants(item.children[i], predicate, matches)
+    }
+    return matches
+}
+
+function field() {
+    var fields = descendants(h.panel, function(item) { return item.objectName === "e2e-location-field" })
+    check(fields.length === 1, "real panel instantiated exactly one location input")
+    return fields[0]
+}
+
+function networkIdle() {
+    for (var i = 0; i < h.panel.data.length; i++) {
+        var object = h.panel.data[i]
+        if (object.command && object.command[0] === "curl" && object.running) return false
+    }
+    return true
+}
+
+function edit(query) {
+    action("open editor", function() { h.panel.startEditingLocation() })
+    pause(60)
+    action("type " + query, function() { field().text = query })
+}
+
+function startup() {
+    action("load byte-identical production component", function() { h.loadPanel() })
+    until("current, daily and hourly startup responses", function() {
+        return h.panel && h.panel.report && h.panel.dailyForecastReport && h.panel.hourlyEntries.length >= 48
+    })
+    action("assert startup render tree", function() {
+        h.panel.controller.show()
+        check(h.panel.reportTempNum === (["auto", "lookups", "schema"].indexOf(h.scenario) >= 0 ? "21" : "23"), "correct current-condition source")
+        check(h.panel.forecastDays.length === 3, "three future forecast days")
+        check(h.panel.hourlyEntries.filter(function(entry) { return entry.kind === "hour" }).length === 48, "48 hourly samples")
+        check(h.panel.hourlyEntries.some(function(entry) { return entry.kind === "sunrise" }), "sunrise in hourly strip")
+        check(h.panel.hourlyEntries.some(function(entry) { return entry.kind === "sunset" }), "sunset in hourly strip")
+        check(h.panel.label !== "", "current icon updated")
+        var processes = 0
+        for (var i = 0; i < h.panel.data.length; i++)
+            if (h.panel.data[i].command && h.panel.data[i].command[0] === "curl") processes++
+        check(processes >= 3, "native curl Processes present in unmodified panel data")
+        var strips = descendants(h.panel, function(item) { return typeof item.scrollBy === "function" })
+        check(strips.length === 1, "complete production HourlyForecast instantiated")
+        check(strips[0].entries.length === h.panel.hourlyEntries.length, "hourly render binding is live")
+        var headings = descendants(h.panel, function(item) { return item.text === "HOURLY \u00b7 NEXT 48 HOURS" })
+        check(headings.length === 1, "hourly heading rendered")
+        var flicks = descendants(strips[0], function(item) { return item.contentX !== undefined })
+        check(flicks.length === 1, "real hourly Flickable instantiated")
+        strips[0].scrollBy(1)
+        check(flicks[0].contentX > 0, "hourly navigation scrolls")
+        strips[0].scrollBy(-1)
+        check(flicks[0].contentX === 0, "hourly navigation returns to beginning")
+    })
+}
+
+function editorScenario() {
+    edit("Test City")
+    until("city suggestions", function() { return h.panel.locationSuggestions.length === 1 })
+    action("verify city search result", function() {
+        check(h.panel.geocodeResultsQuery === "Test City", "city results match edited text")
+        check(h.panel.locationSuggestions[0].name === "Test City, Test Region", "city suggestion label")
+        check(h.panel.locationSuggestions[0].latitude === 41, "city coordinates preserved")
+    })
+    control({ tag: "city-save", daily: [{ mode: "good", delay: 600, temperature: 27 }] })
+    action("commit city", function() { h.panel.commitLocation() })
+    until("city persisted and refresh started", function() { return h.panel.locationQuery === "41,-76" && h.panel.savingLocationQueryStarted })
+    action("wait for correct provider before completing save", function() {
+        check(h.panel.savingLocation && h.panel.editingLocation, "spinner remains until Open-Meteo finishes")
+        check(h.panel.hourlyEntries.length === 0, "old hourly location is hidden during save")
+    })
+    until("city save completed", function() { return !h.panel.savingLocation && !h.panel.editingLocation })
+    action("verify city save", function() {
+        check(h.panel.configuredLocation === "Test City, Test Region", "configured label applied")
+        check(h.panel.dailyForecastReport.fixture === "city-save", "save waited for new daily response")
+        check(h.panel.reportTempNum === "27", "new conditions rendered")
+    })
+    control({ tag: "same-save", daily: [{ mode: "good", delay: 300 }] })
+    action("edit current pin", function() { h.panel.startEditingLocation() })
+    until("saved-pin suggestion", function() { return h.panel.locationSuggestions.length === 1 })
+    action("re-save unchanged location", function() { h.panel.commitLocation() })
+    until("unchanged pin save completes", function() {
+        return !h.panel.savingLocation && !h.panel.editingLocation && h.panel.dailyForecastReport.fixture === "same-save"
+    })
+    edit("19103")
+    until("ZIP suggestion", function() { return h.panel.geocodeResultsQuery === "19103" && h.panel.locationSuggestions.length === 1 })
+    action("verify ZIP lookup", function() {
+        check(h.panel.locationSuggestions[0].name === "Philadelphia, PA 19103", "ZIP city/state label")
+        check(h.panel.locationSuggestions[0].latitude === 39.95, "numeric ZIP coordinates")
+        check(h.panel.locationSuggestions[0].description.indexOf("approximate") >= 0, "ZIP approximation disclosed")
+        h.panel.commitLocation()
+    })
+    until("ZIP saved", function() { return !h.panel.editingLocation && h.panel.locationQuery === "39.95,-75.17" })
+    action("clear configured pin", function() { h.panel.clearLocation() })
+    until("clear restored auto-location", function() { return h.panel.locationQuery === "" && h.panel.wttrLocation === "Auto City" })
+    action("verify cleared editor", function() { check(!h.panel.editingLocation && !h.panel.savingLocation, "clear closes editor") })
+}
+
+function failuresScenario() {
+    var oldReport
+    var oldDaily
+    var updatedAt
+    action("capture last good state", function() {
+        oldReport = h.panel.report
+        oldDaily = h.panel.dailyForecastReport
+        updatedAt = h.panel.hourlyUpdatedAt
+    })
+    control({ tag: "exhaust", forecast: ["http", "oversize", "truncated", "malformed"], daily: ["http", "oversize", "truncated", "malformed"], fallback: "http" })
+    action("refresh with failing providers", function() { h.panel.refresh() })
+    until("first native failures retain stale forecast", function() { return h.panel.forecastRetries === 1 && h.panel.dailyForecastRetries === 1 })
+    action("verify stale rendering after transport failure", function() {
+        check(h.panel.report === oldReport, "wttr report retained")
+        check(h.panel.dailyForecastReport === oldDaily, "daily report retained")
+        check(h.panel.hourlyUpdatedAt === updatedAt, "failed fetch does not mark data fresh")
+        check(h.panel.hourlyStatus === "Update failed \u00b7 Showing last forecast", "stale status surfaced")
+        check(h.panel.hourlyEntries.length >= 48, "last-good hourly entries remain visible")
+    })
+    waitForRequests("exhaust", { forecast: 4, daily: 4 }, 15000)
+    action("verify three retries and exhausted budget", function() {
+        check(h.panel.forecastRetries === 3 && h.panel.dailyForecastRetries === 3, "both retry budgets capped at three")
+        check(h.panel.report === oldReport && h.panel.dailyForecastReport === oldDaily, "HTTP, oversize, valid-prefix truncation and JSON failures retained last-good data")
+        var attempts = h.stats.requests.filter(function(request) { return request.tag === "exhaust" })
+        check(attempts.filter(function(request) { return request.kind === "forecast" }).length === 4, "exactly initial wttr attempt plus three timed retries")
+        check(attempts.filter(function(request) { return request.kind === "daily" }).length === 4, "exactly initial daily attempt plus three timed retries")
+    })
+    control({ tag: "recover", forecast: ["http", "good"], daily: ["http", "good"] })
+    action("explicit refresh renews retry budget", function() { h.panel.refresh() })
+    until("new cycle receives a retry", function() { return h.panel.forecastRetries === 1 && h.panel.dailyForecastRetries === 1 })
+    until("new retry succeeds", function() {
+        return h.panel.report.fixture === "recover" && h.panel.dailyForecastReport.fixture === "recover" && !h.panel.hourlyFetchFailed
+    })
+    action("verify recovery", function() {
+        check(h.panel.forecastRetries === 0 && h.panel.dailyForecastRetries === 0, "success clears retry counters")
+        check(h.panel.hourlyStatus === "", "success clears stale warning")
+        check(h.panel.hourlyUpdatedAt > updatedAt, "success advances freshness timestamp")
+    })
+    control({ tag: "chunked", forecast: ["chunked", "good"], daily: ["chunked", "good"] })
+    action("refresh with chunked size overflows", function() { h.panel.refresh() })
+    until("chunked overflow rejected", function() { return h.panel.forecastRetries === 1 && h.panel.dailyForecastRetries === 1 })
+    action("valid JSON prefix from oversized streams not accepted", function() {
+        check(h.panel.report.fixture === "recover" && h.panel.dailyForecastReport.fixture === "recover", "exit status wins over parseable prefix")
+    })
+    until("chunked failures recover", function() {
+        return h.panel.report.fixture === "chunked" && h.panel.dailyForecastReport.fixture === "chunked" && !h.panel.hourlyFetchFailed
+    })
+}
+
+function racesScenario() {
+    control({ tag: "search-race", geocode: [{ mode: "good", delay: 1200 }, "good"] })
+    edit("Old City")
+    until("old lookup started", function() { return h.panel.geocodeActiveQuery === "Old City" })
+    pause(150)
+    action("replace query in flight", function() { field().text = "New City" })
+    until("new lookup wins", function() { return h.panel.geocodeResultsQuery === "New City" && h.panel.locationSuggestions.length === 1 })
+    pause(1300)
+    action("stale city result never applied", function() {
+        check(h.panel.locationSuggestions[0].name === "New City, Test Region", "only latest city suggestions visible")
+        check(h.panel.locationError === "", "cancelled old process does not show lookup error")
+    })
+    control({ tag: "cancel-search", geocode: [{ mode: "good", delay: 1000 }] })
+    action("start cancelled lookup", function() { field().text = "Cancel City" })
+    until("cancel lookup started", function() { return h.panel.geocodeActiveQuery === "Cancel City" })
+    pause(150)
+    action("cancel editor while process running", function() { h.panel.cancelEditingLocation() })
+    pause(1100)
+    action("cancelled lookup cannot repopulate editor", function() {
+        check(!h.panel.editingLocation && h.panel.locationSuggestions.length === 0, "cancel clears suggestions")
+        check(h.panel.geocodePendingQuery === "", "cancel clears queued query")
+    })
+    control({
+        tag: "weather-race",
+        forecast: [{ mode: "good", delay: 1500, marker: "obsolete" }, { mode: "good", marker: "replacement" }],
+        daily: [{ mode: "good", delay: 1500, marker: "obsolete" }, { mode: "good", marker: "replacement" }]
+    })
+    action("start old weather refresh", function() { h.panel.refresh() })
+    pause(200)
+    action("change configured coordinates in flight", function() {
+        h.panel.configuredLocationState = { name: "New Pin", latitude: 43, longitude: -78 }
+    })
+    until("new location weather finishes", function() {
+        return h.panel.hourlyLocationQuery === "43,-78" && h.panel.dailyForecastReport.fixture === "replacement"
+    })
+    pause(1700)
+    action("new coordinates retain correct hourly binding", function() {
+        check(h.panel.locationQuery === "43,-78", "query replacement preserved")
+        check(h.panel.hourlyLocationQuery === h.panel.locationQuery, "hourly data is labeled with new query")
+        check(h.panel.hourlyEntries.length >= 48, "new hourly data renders")
+        check(h.panel.report.fixture === "replacement" && h.panel.dailyForecastReport.fixture === "replacement", "obsolete weather bodies never overwrite replacement")
+    })
+}
+
+function lookupsScenario() {
+    until("auto-location ready", function() { return h.panel.wttrLocation === "Auto City" })
+    var modes = ["http", "oversize", "truncated", "empty"]
+    modes.forEach(function(mode) {
+        until("previous requests finish", networkIdle)
+        control({ tag: "location-" + mode, location: [mode] })
+        action("refresh auto-location with " + mode, function() { h.panel.refresh() })
+        until("auto-location request completes", networkIdle)
+        action("retain auto-label after " + mode, function() {
+            check(h.panel.wttrLocation === "Auto City", "failed IP lookup retains label")
+        })
+    })
+    modes.concat(["chunked", "malformed"]).forEach(function(mode, index) {
+        control({ tag: "geocode-" + mode, geocode: [mode] })
+        edit(String(19110 + index))
+        until("lookup failure visible for " + mode, function() { return h.panel.locationError !== "" })
+        action("reject geocode " + mode, function() {
+            check(h.panel.locationSuggestions.length === 0, "failed lookup has no selectable suggestions")
+            check(h.panel.geocodeResultsQuery === "", "failed lookup does not mark query resolved")
+            h.panel.commitLocation()
+            check(h.panel.locationError === "Choose a matching location below before saving.", "failed result cannot be committed")
+            check(!h.panel.savingLocation, "invalid commit never starts a save")
+            h.panel.cancelEditingLocation()
+        })
+    })
+    control({ tag: "city-malformed", geocode: ["malformed"] })
+    edit("Malformed City")
+    until("malformed city lookup resolves", function() { return h.panel.locationError !== "" })
+    action("document existing malformed-city fallback", function() {
+        check(h.panel.locationSuggestions.length === 0, "malformed city JSON cannot produce a suggestion")
+        check(h.panel.locationError.indexOf("No locations found.") === 0, "existing city parser maps malformed JSON to no results")
+        h.panel.commitLocation()
+        check(!h.panel.savingLocation, "malformed city lookup cannot be saved")
+        h.panel.cancelEditingLocation()
+    })
+    control({ tag: "lookup-recovery" })
+    edit("19103")
+    until("lookup recovers", function() { return h.panel.locationSuggestions.length === 1 })
+    action("verify lookup recovery", function() {
+        check(h.panel.geocodeResultsQuery === "19103", "retry resolves current ZIP")
+        check(h.panel.locationError === "", "success clears lookup error")
+        h.panel.cancelEditingLocation()
+    })
+}
+
+function memoryScenario() {
+    var previousReport
+    var previousDaily
+    until("startup processes settle", networkIdle)
+    control({ inspect: true, memory: "baseline" })
+    ;["http", "oversize", "truncated", "chunked"].forEach(function(mode) {
+        var tag = "memory-" + mode
+        action("remember previous successful reports", function() {
+            previousReport = h.panel.report
+            previousDaily = h.panel.dailyForecastReport
+        })
+        control({ tag: tag, forecast: [mode, "good"], daily: [mode, "good"] })
+        action("start repeated failure cycle " + mode, function() { h.panel.refresh() })
+        until("both failures observed " + mode, function() {
+            return h.panel.forecastRetries === 1 && h.panel.dailyForecastRetries === 1 && networkIdle()
+        })
+        action("check retained state " + mode, function() {
+            check(h.panel.report === previousReport && h.panel.dailyForecastReport === previousDaily, "failure cycle retains both reports")
+            check(h.panel.hourlyFetchFailed && h.panel.hourlyEntries.length >= 48, "stale hourly forecast remains usable")
+        })
+        control({ inspect: true, memory: mode + "-failed" })
+        until("both scheduled retries recovered " + mode, function() {
+            return h.panel.report.fixture === tag && h.panel.dailyForecastReport.fixture === tag
+                && !h.panel.hourlyFetchFailed && networkIdle()
+        })
+        action("check repeated recovery " + mode, function() {
+            check(h.panel.forecastRetries === 0 && h.panel.dailyForecastRetries === 0, "recovery resets counters")
+            check(h.panel.hourlyStatus === "" && h.panel.hourlyEntries.length >= 48, "recovery keeps rendered forecast healthy")
+        })
+        control({ inspect: true, memory: mode + "-recovered" })
+    })
+}
+
+function schemaScenario() {
+    var previousReport
+    ;["schema-null", "schema-missing-current", "schema-null-current"].forEach(function(mode) {
+        until("previous weather process settles", networkIdle)
+        action("capture schema-test last good report", function() { previousReport = h.panel.report })
+        control({ tag: mode, forecast: [mode, "good"] })
+        action("fetch schema-invalid wttr JSON", function() { h.panel.refresh() })
+        until("schema failure schedules retry", function() { return h.panel.forecastRetries === 1 && networkIdle() })
+        action("schema validation precedes assigning report", function() {
+            check(h.panel.report === previousReport, "schema-invalid response did not replace last-good report")
+            check(h.panel.reportTempNum === "21", "last-good wttr current conditions remain visible in auto mode")
+            check(h.panel.hourlyEntries.length >= 48 && !h.panel.hourlyFetchFailed, "valid independent hourly response remains usable")
+        })
+        until("schema failure recovers with valid wttr shape", function() {
+            return h.panel.report && h.panel.report.fixture === mode && h.panel.forecastRetries === 0
+        })
+        action("validate schema retry recovery", function() {
+            check(Array.isArray(h.panel.report.current_condition) && h.panel.report.current_condition[0].temp_C === "21", "valid provider-shaped current conditions accepted")
+        })
+    })
+}
+
+function start(harness) {
+    h = harness
+    startup()
+    if (h.scenario === "auto") {
+        until("IP auto-location label", function() { return h.panel.wttrLocation === "Auto City" })
+        action("verify auto mode", function() {
+            check(h.panel.locationQuery === "", "no configured location")
+            check(h.panel.reportLocation === "Auto City", "IP label is displayed")
+            check(!h.panel.hasConfiguredCoordinates, "auto mode did not persist coordinates")
+        })
+    } else if (h.scenario === "editor") editorScenario()
+    else if (h.scenario === "failures") failuresScenario()
+    else if (h.scenario === "races") racesScenario()
+    else if (h.scenario === "lookups") lookupsScenario()
+    else if (h.scenario === "memory") memoryScenario()
+    else if (h.scenario === "schema") schemaScenario()
+}

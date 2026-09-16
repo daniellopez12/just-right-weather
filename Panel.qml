@@ -4,6 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "Network.js" as Network
 
 Panel {
   id: root
@@ -208,7 +209,7 @@ Panel {
       + "&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day"
       + "&forecast_days=4"
       + "&timezone=auto"
-    dailyForecastProc.command = ["curl", "-fsS", "--max-time", "5", url]
+    dailyForecastProc.command = Network.curlCommand(url, 5, Network.responseLimits.dailyForecast)
     dailyForecastProc.running = true
   }
 
@@ -311,8 +312,8 @@ Panel {
   function startGeocode() {
     if (!editingLocation || geocodePendingQuery.length < 2) return
     geocodeActiveQuery = geocodePendingQuery
-    geocodeProc.command = ["curl", "-fsS", "--max-time", "5",
-      Model.locationSearchUrl(geocodeActiveQuery)]
+    geocodeProc.command = Network.curlCommand(Model.locationSearchUrl(geocodeActiveQuery),
+      5, Network.responseLimits.geocode)
     geocodeProc.running = true
   }
 
@@ -438,31 +439,36 @@ Panel {
 
   Process {
     id: forecastProc
-    command: ["curl", "-fsS", "--max-time", "10", "https://wttr.in/" + root.locationQuery + "?format=j1"]
+    command: Network.curlCommand("https://wttr.in/" + root.locationQuery + "?format=j1",
+      10, Network.responseLimits.forecast)
     stdout: StdioCollector {
+      id: forecastOutput
       waitForEnd: true
-      onStreamFinished: {
-        var raw = String(text || "").trim()
-        if (!raw) {
-          root.scheduleForecastRetry()
-          return
-        }
-        try {
-          var parsed = JSON.parse(raw)
-          root.report = parsed
-          if (!root.hasConfiguredCoordinates)
-            root.label = Model.provisionalCurrentIcon(parsed.current_condition && parsed.current_condition[0], root.label)
-          root.forecastRetries = 0
-          if (Model.weatherResponseCompletesSave(root.hasConfiguredCoordinates, "wttr"))
-            root.finishSavingLocation()
-          // Stored coordinates already drove the fast open-meteo fetch from
-          // refresh(); only auto-detect needs the area wttr reported.
-          if (isNaN(parseFloat(String(root.configuredLocationState.latitude))))
-            root.refreshDailyForecast(parsed)
-        } catch (e) {
-          // Keep last-good report visible, but try again shortly.
-          root.scheduleForecastRetry()
-        }
+    }
+    // Quickshell finishes the collector before emitting exited.
+    onExited: function(exitCode, exitStatus) {
+      try {
+        var raw = Network.responseText(forecastOutput.text, exitCode,
+          exitStatus, Network.responseLimits.forecast)
+        var parsed = JSON.parse(raw)
+        if (!parsed || !Array.isArray(parsed.current_condition)
+            || !parsed.current_condition[0] || typeof parsed.current_condition[0] !== "object"
+            || Array.isArray(parsed.current_condition[0]))
+          throw new Error("No current conditions in weather response")
+        root.report = parsed
+        if (!root.hasConfiguredCoordinates)
+          root.label = Model.provisionalCurrentIcon(parsed.current_condition && parsed.current_condition[0], root.label)
+        root.forecastRetries = 0
+        if (Model.weatherResponseCompletesSave(root.hasConfiguredCoordinates, "wttr"))
+          root.finishSavingLocation()
+        // Stored coordinates already drove the fast open-meteo fetch from
+        // refresh(); only auto-detect needs the area wttr reported.
+        if (isNaN(parseFloat(String(root.configuredLocationState.latitude))))
+          root.refreshDailyForecast(parsed)
+      } catch (e) {
+        console.warn("Weather response failed: " + e)
+        // Keep last-good report visible, but try again shortly.
+        root.scheduleForecastRetry()
       }
     }
   }
@@ -498,69 +504,63 @@ Panel {
 
   Process {
     id: dailyForecastProc
-    onExited: function(exitCode) {
-      if (exitCode !== 0) {
-        root.hourlyFetchFailed = true
-        console.warn("Hourly weather request failed with exit code " + exitCode)
-      }
-    }
     stdout: StdioCollector {
+      id: dailyForecastOutput
       waitForEnd: true
-      onStreamFinished: {
-        var raw = String(text || "").trim()
-        if (!raw) {
-          root.hourlyFetchFailed = true
-          root.scheduleDailyForecastRetry()
-          return
-        }
-        try {
-          var parsed = JSON.parse(raw)
-          if (parsed.error) throw new Error(parsed.reason || "Weather API error")
-          if (Model.hourlyForecast(parsed, Date.now(), 48).length === 0)
-            throw new Error("No upcoming hourly forecast in weather response")
-          var parsedCurrent = Model.openMeteoCurrentCondition(parsed)
-          root.dailyForecastReport = parsed
-          root.forecastClock = Date.now()
-          root.hourlyUpdatedAt = root.forecastClock
-          root.hourlyLocationQuery = root.locationQuery
-          root.hourlyFetchFailed = false
-          root.label = Model.currentIcon(parsedCurrent, root.label)
-          root.dailyForecastRetries = 0
-          if (Model.weatherResponseCompletesSave(root.hasConfiguredCoordinates, "open-meteo"))
-            root.finishSavingLocation()
-        } catch (e) {
-          root.hourlyFetchFailed = true
-          console.warn("Hourly weather response failed: " + e)
-          // Keep last-good daily forecast visible, but try again shortly.
-          root.scheduleDailyForecastRetry()
-        }
+    }
+    onExited: function(exitCode, exitStatus) {
+      try {
+        var raw = Network.responseText(dailyForecastOutput.text, exitCode,
+          exitStatus, Network.responseLimits.dailyForecast)
+        var parsed = JSON.parse(raw)
+        if (parsed.error) throw new Error(parsed.reason || "Weather API error")
+        if (Model.hourlyForecast(parsed, Date.now(), 48).length === 0)
+          throw new Error("No upcoming hourly forecast in weather response")
+        var parsedCurrent = Model.openMeteoCurrentCondition(parsed)
+        root.dailyForecastReport = parsed
+        root.forecastClock = Date.now()
+        root.hourlyUpdatedAt = root.forecastClock
+        root.hourlyLocationQuery = root.locationQuery
+        root.hourlyFetchFailed = false
+        root.label = Model.currentIcon(parsedCurrent, root.label)
+        root.dailyForecastRetries = 0
+        if (Model.weatherResponseCompletesSave(root.hasConfiguredCoordinates, "open-meteo"))
+          root.finishSavingLocation()
+      } catch (e) {
+        root.hourlyFetchFailed = true
+        console.warn("Hourly weather response failed: " + e)
+        // Keep last-good daily forecast visible, but try again shortly.
+        root.scheduleDailyForecastRetry()
       }
     }
   }
 
   Process {
     id: geocodeProc
-    onExited: function(exitCode) {
-      if (exitCode !== 0 && root.editingLocation && locationField.text.trim() === root.geocodeActiveQuery)
-        root.locationError = "Location lookup failed or ZIP not found. Try again."
-      if (root.editingLocation && root.geocodePendingQuery.length >= 2 && root.geocodePendingQuery !== root.geocodeActiveQuery)
-        Qt.callLater(root.startGeocode)
-    }
     stdout: StdioCollector {
+      id: geocodeOutput
       waitForEnd: true
-      onStreamFinished: {
-        if (!root.editingLocation || locationField.text.trim() !== root.geocodeActiveQuery) return
-        if (!String(text || "").trim()) return
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (root.editingLocation && locationField.text.trim() === root.geocodeActiveQuery) {
         try {
-          root.locationSuggestions = Model.parseLocationSearch(text, root.geocodeActiveQuery)
+          var raw = Network.responseText(geocodeOutput.text, exitCode,
+            exitStatus, Network.responseLimits.geocode)
+          root.locationSuggestions = Model.parseLocationSearch(raw, root.geocodeActiveQuery)
           root.geocodeResultsQuery = root.geocodeActiveQuery
           root.locationError = root.locationSuggestions.length ? "" : "No locations found. Try a ZIP or a shorter city name."
           root.suggestionIndex = 0
         } catch (e) {
-          root.locationError = "Could not read location results. Try again."
+          root.locationSuggestions = []
+          root.geocodeResultsQuery = ""
+          root.locationError = exitCode !== 0 || exitStatus !== 0
+            ? "Location lookup failed or ZIP not found. Try again."
+            : "Could not read location results. Try again."
           console.warn("Weather location lookup failed: " + e)
         }
       }
+      if (root.editingLocation && root.geocodePendingQuery.length >= 2 && root.geocodePendingQuery !== root.geocodeActiveQuery)
+        Qt.callLater(root.startGeocode)
     }
   }
 
@@ -600,13 +600,18 @@ Panel {
 
   Process {
     id: locationProc
-    command: ["curl", "-fsS", "--max-time", "4", "https://wttr.in/?format=%l"]
+    command: Network.curlCommand("https://wttr.in/?format=%l", 4, Network.responseLimits.location)
     stdout: StdioCollector {
+      id: locationOutput
       waitForEnd: true
-      onStreamFinished: {
-        var raw = String(text || "").trim()
-        if (!raw) return
+    }
+    onExited: function(exitCode, exitStatus) {
+      try {
+        var raw = Network.responseText(locationOutput.text, exitCode,
+          exitStatus, Network.responseLimits.location)
         root.wttrLocation = raw.split(",")[0]
+      } catch (e) {
+        console.warn("Weather location response failed: " + e)
       }
     }
   }
