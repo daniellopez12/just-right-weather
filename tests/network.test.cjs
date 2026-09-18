@@ -51,6 +51,7 @@ function runExitHandler(name, raw, exitCode = 0, exitStatus = 0, overrides = {})
     scheduleDailyForecastRetry() { state.dailyRetries++; },
     finishSavingLocation() { state.saves++; },
     refreshDailyForecast() { state.refreshes++; },
+    forecastCoordinates() { return [40, -75]; },
     startGeocode() {},
     cacheWeatherResponse(source, data, updatedAt) { state.cached.push({ source, data, updatedAt }); },
     ...overrides
@@ -61,6 +62,7 @@ function runExitHandler(name, raw, exitCode = 0, exitStatus = 0, overrides = {})
   const sandbox = {
     root,
     requestQuery: "current-query",
+    requestCoordinates: [40, -75],
     Network,
     Model: {
       ...Model,
@@ -219,6 +221,26 @@ test("malformed forecast JSON retains stale reports and schedules retries", () =
     assert.equal(result.root.dailyForecastReport, result.previousDaily);
     assert.equal(result.state.retries + result.state.dailyRetries, 1);
     assert.equal(result.state.warnings.length, 1);
+  }
+});
+
+test("obsolete daily coordinates reject successes and failures before parsing or mutating state", () => {
+  for (const coordinates of [[41, -75], [40, -76], null]) {
+    for (const code of [0, 22, 28]) {
+      const result = runExitHandler("dailyForecast", dailyResponse(), code, 0, {
+        forecastCoordinates() { return coordinates; }
+      });
+      assert.equal(result.state.parses, 0);
+      assert.equal(result.root.dailyForecastReport, result.previousDaily);
+      assert.equal(result.root.hourlyUpdatedAt, 123);
+      assert.equal(result.root.label, "previous-icon");
+      assert.equal(result.root.hourlyFetchFailed, false);
+      assert.equal(result.state.cached.length, 0);
+      assert.equal(result.state.saves, 0);
+      assert.equal(result.state.dailyRetries, 0);
+      assert.equal(result.state.warnings.length, 0);
+      assert.deepEqual(result.state.queued, [result.root.refreshDailyForecast]);
+    }
   }
 });
 

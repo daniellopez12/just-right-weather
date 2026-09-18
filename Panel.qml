@@ -74,6 +74,7 @@ Panel {
 
   // Parsed wttr.in j1 response. Kept on failure so stale data stays visible.
   property var report: null
+  property double reportUpdatedAt: 0
   property string reportLocationQuery: ""
   property bool reportIsLive: false
   property var dailyForecastReport: null
@@ -85,7 +86,8 @@ Panel {
     ? Model.hourlyForecast(dailyForecastReport, forecastClock, 48) : []
   readonly property string hourlyStatus: hourlyFetchFailed && hourlyEntries.length > 0
     ? "Update failed \u00b7 Showing last forecast"
-    : (hourlyUpdatedAt > 0 && forecastClock - hourlyUpdatedAt > root.refreshMinutes * 120000
+    : ((hourlyUpdatedAt > 0 && forecastClock - hourlyUpdatedAt > root.refreshMinutes * 120000)
+      || (currentUpdatedAt > 0 && forecastClock - currentUpdatedAt > root.refreshMinutes * 120000)
       ? "Forecast may be outdated \u00b7 Middle-click weather to retry" : "")
   property string wttrLocation: ""
   property bool locationReady: false
@@ -102,6 +104,7 @@ Panel {
     if (weatherCache && weatherCache.locationQuery === locationQuery) {
       if (weatherCache.report) {
         report = weatherCache.report.data
+        reportUpdatedAt = weatherCache.report.updatedAt
         reportLocationQuery = weatherCache.locationQuery
       }
       if (weatherCache.dailyForecast) {
@@ -250,6 +253,7 @@ Panel {
   readonly property bool hasConfiguredCoordinates: !isNaN(parseFloat(String(configuredLocationState.latitude))) && !isNaN(parseFloat(String(configuredLocationState.longitude)))
   readonly property var openMeteoCurrent: Model.openMeteoCurrentCondition(dailyForecastReport)
   readonly property var current: (hasConfiguredCoordinates && openMeteoCurrent) ? openMeteoCurrent : ((report && report.current_condition && report.current_condition[0]) ? report.current_condition[0] : openMeteoCurrent)
+  readonly property double currentUpdatedAt: current === openMeteoCurrent ? hourlyUpdatedAt : reportUpdatedAt
   readonly property var areaInfo: report && report.nearest_area && report.nearest_area[0] ? report.nearest_area[0] : null
   readonly property var forecastDays: buildForecastDays()
   readonly property string reportCountry: areaInfo && areaInfo.country && areaInfo.country[0] ? areaInfo.country[0].value : ""
@@ -288,9 +292,7 @@ Panel {
     forecastProc.running = true
   }
 
-  function refreshDailyForecast(sourceReport) {
-    if (dailyForecastProc.running) return
-
+  function forecastCoordinates(sourceReport) {
     var lat = parseFloat(String(root.configuredLocationState.latitude))
     var lon = parseFloat(String(root.configuredLocationState.longitude))
     if (isNaN(lat) || isNaN(lon)) {
@@ -300,15 +302,21 @@ Panel {
         && (locationQuery !== "" || reportIsLive)
       var area = sourceReport && sourceReport.nearest_area && sourceReport.nearest_area[0]
         ? sourceReport.nearest_area[0] : (canReuseArea ? root.areaInfo : null)
-      if (!area) return
-      lat = parseFloat(String(area.latitude || ""))
-      lon = parseFloat(String(area.longitude || ""))
+      if (!area) return null
+      lat = parseFloat(String(area.latitude))
+      lon = parseFloat(String(area.longitude))
     }
-    if (isNaN(lat) || isNaN(lon)) return
+    return Model.validCoordinates(lat, lon) ? [lat, lon] : null
+  }
+
+  function refreshDailyForecast(sourceReport) {
+    if (dailyForecastProc.running) return
+    var coordinates = forecastCoordinates(sourceReport)
+    if (!coordinates) return
 
     var url = "https://api.open-meteo.com/v1/forecast"
-      + "?latitude=" + encodeURIComponent(String(lat))
-      + "&longitude=" + encodeURIComponent(String(lon))
+      + "?latitude=" + encodeURIComponent(String(coordinates[0]))
+      + "&longitude=" + encodeURIComponent(String(coordinates[1]))
       + "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset"
       + "&hourly=temperature_2m,precipitation_probability,precipitation,weather_code,is_day"
       + "&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day"
@@ -316,6 +324,7 @@ Panel {
       + "&timezone=auto"
     dailyForecastProc.command = Network.curlCommand(url, 5, Network.responseLimits.dailyForecast)
     dailyForecastProc.requestQuery = locationQuery
+    dailyForecastProc.requestCoordinates = coordinates
     dailyForecastProc.running = true
   }
 
@@ -565,9 +574,10 @@ Panel {
         if (!Model.validWeatherReport(parsed))
           throw new Error("No current conditions in weather response")
         root.report = parsed
+        root.reportUpdatedAt = Date.now()
         root.reportLocationQuery = root.locationQuery
         root.reportIsLive = true
-        root.cacheWeatherResponse("report", parsed, Date.now())
+        root.cacheWeatherResponse("report", parsed, root.reportUpdatedAt)
         if (!root.hasConfiguredCoordinates)
           root.label = Model.provisionalCurrentIcon(parsed.current_condition && parsed.current_condition[0], root.label)
         root.forecastRetries = 0
@@ -617,12 +627,17 @@ Panel {
   Process {
     id: dailyForecastProc
     property string requestQuery: ""
+    property var requestCoordinates: null
     stdout: StdioCollector {
       id: dailyForecastOutput
       waitForEnd: true
     }
     onExited: function(exitCode, exitStatus) {
-      if (requestQuery !== root.locationQuery) {
+      // Auto mode keeps an empty query even when the detected area changes.
+      // Compare request coordinates, not the provider's rounded grid location.
+      var coordinates = root.forecastCoordinates(null)
+      if (requestQuery !== root.locationQuery || !coordinates || !requestCoordinates
+          || requestCoordinates[0] !== coordinates[0] || requestCoordinates[1] !== coordinates[1]) {
         Qt.callLater(root.refreshDailyForecast, null)
         return
       }
@@ -1146,8 +1161,10 @@ Panel {
 
       Text {
         visible: root.hourlyEntries.length === 0
-        text: root.hourlyFetchFailed ? "Hourly forecast unavailable \u00b7 Middle-click weather to retry"
-          : (dailyForecastProc.running || forecastProc.running ? "Fetching hourly forecast\u2026" : "Hourly forecast unavailable")
+        width: parent.width
+        wrapMode: Text.Wrap
+        text: root.hourlyStatus || (root.hourlyFetchFailed ? "Hourly forecast unavailable \u00b7 Middle-click weather to retry"
+          : (dailyForecastProc.running || forecastProc.running ? "Fetching hourly forecast\u2026" : "Hourly forecast unavailable"))
         color: root.foreground
         opacity: 0.7
         font.family: root.fontFamily

@@ -89,8 +89,10 @@ only for the same configured location (or the same IP-auto-detect mode), and
 retains its original fetch time so outdated forecasts still show a warning.
 IP-auto-detected weather may describe your previous location until a refresh
 succeeds after you move networks. After a restart, auto mode waits for live wttr
-coordinates before requesting Open-Meteo. If the detected area changes, the old
-daily payload stays visible but is removed from the disk cache until its
+coordinates before requesting Open-Meteo. Every daily response is also checked
+against the current request coordinates, so in-flight responses from a previous
+area cannot overwrite the cache during later refreshes. If the detected area
+changes, the old daily payload stays visible but is removed from the disk cache until its
 replacement succeeds. The first run still needs a successful fetch.
 
 The shell lifecycle commands use the permanent ID:

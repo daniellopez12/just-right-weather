@@ -121,7 +121,7 @@ function startup() {
     })
     action("assert startup render tree", function() {
         h.panel.controller.show()
-        check(h.panel.reportTempNum === (["auto", "lookups", "schema", "timeouts", "auto-cache"].indexOf(h.scenario) >= 0 ? "21" : "23"), "correct current-condition source")
+        check(h.panel.reportTempNum === (["auto", "lookups", "schema", "timeouts", "auto-cache", "auto-refresh", "auto-refresh-interrupted"].indexOf(h.scenario) >= 0 ? "21" : "23"), "correct current-condition source")
         check(h.panel.forecastDays.length === 3, "three future forecast days")
         check(h.panel.hourlyEntries.filter(function(entry) { return entry.kind === "hour" }).length === 48, "48 hourly samples")
         check(h.panel.hourlyEntries.some(function(entry) { return entry.kind === "sunrise" }), "sunrise in hourly strip")
@@ -386,6 +386,10 @@ function start(harness) {
         autoCacheRestartScenario()
         return
     }
+    if (h.scenario === "cache-expired" || h.scenario === "cache-report-expired") {
+        expiredCacheScenario()
+        return
+    }
     if (h.scenario.indexOf("cache-") === 0 && h.scenario !== "cache-write-error") {
         cacheRestartScenario()
         return
@@ -405,6 +409,7 @@ function start(harness) {
     else if (h.scenario === "memory") memoryScenario()
     else if (h.scenario === "schema") schemaScenario()
     else if (h.scenario === "timeouts") timeoutsScenario()
+    else if (h.scenario === "auto-refresh" || h.scenario === "auto-refresh-interrupted") autoRefreshScenario()
     else if (h.scenario === "cache" || h.scenario === "cache-write-error" || h.scenario === "auto-cache") {
         until("native cache writes settle", function() {
             return networkIdle() && !h.panel.cacheWriteInFlight && !h.panel.cacheWritePending
@@ -413,6 +418,85 @@ function start(harness) {
             check(h.panel.reportTempNum === (h.scenario === "auto-cache" ? "21" : "23") && h.panel.hourlyEntries.length >= 48, "current and hourly weather remain visible")
         })
     }
+}
+
+function expiredCacheScenario() {
+    function checkWarning() {
+        check(h.panel.hourlyEntries.length === 0, "expired forecast has no current hourly entries")
+        check(h.panel.reportTempNum === (h.scenario === "cache-report-expired" ? "21" : "23"), "last-good current conditions remain visible")
+        check(h.panel.currentUpdatedAt < Date.now() - 6 * 86400000, "current conditions retain their original age")
+        check(h.panel.hourlyStatus.indexOf("Forecast may be outdated") === 0, "old current conditions produce a stale warning")
+        var warnings = descendants(h.panel, function(item) {
+            return item.visible && item.text === h.panel.hourlyStatus
+        })
+        check(warnings.length === 1, "exactly one stale warning is visible without the hourly strip")
+    }
+    action("restart with week-old weather while offline", function() { h.loadPanel() })
+    until("expired cache loads", function() { return h.panel && h.panel.weatherReady })
+    action("show age warning before delayed requests finish", function() {
+        h.panel.controller.show()
+        checkWarning()
+    })
+    until("offline requests fail", function() {
+        return h.panel.forecastRetries > 0 && h.panel.dailyForecastRetries > 0
+    })
+    action("age warning remains visible after failures", checkWarning)
+}
+
+function autoRefreshScenario() {
+    var oldDaily
+    var updatedAt
+    var cases = [
+        { tag: "auto-refresh-report-first", coordinates: [44, -79], forecastDelay: 500, dailyDelay: 1400, dailyMode: "good" },
+        { tag: "auto-refresh-daily-first", coordinates: [45, -80], forecastDelay: 1400, dailyDelay: 100, dailyMode: "good" },
+        { tag: "auto-refresh-old-failed", coordinates: [45, -81], forecastDelay: 500, dailyDelay: 1400, dailyMode: "http" }
+    ]
+    if (h.scenario === "auto-refresh-interrupted") cases = cases.slice(0, 1)
+    cases.forEach(function(testCase) {
+        until("previous live auto refresh settles", function() {
+            return networkIdle() && !h.panel.cacheWritePending && !h.panel.cacheWriteInFlight
+        })
+        control({
+            tag: testCase.tag,
+            forecast: { delay: testCase.forecastDelay, coordinates: testCase.coordinates },
+            daily: [
+                { mode: testCase.dailyMode, delay: testCase.dailyDelay, marker: testCase.tag + "-obsolete" },
+                { delay: 800, marker: testCase.tag + "-current" }
+            ]
+        })
+        action("refresh after moving networks without restarting", function() {
+            check(h.panel.reportIsLive && h.panel.locationQuery === "", "previous wttr report is already live in auto mode")
+            oldDaily = h.panel.dailyForecastReport
+            updatedAt = h.panel.hourlyUpdatedAt
+            h.panel.refresh()
+        })
+        until("new detected area replaces the live wttr report", function() {
+            return h.panel.report.fixture === testCase.tag && !h.panel.cacheWritePending && !h.panel.cacheWriteInFlight
+        })
+        if (testCase.forecastDelay < testCase.dailyDelay) {
+            action("old-coordinate request is still in flight", function() {
+                check(h.panel.dailyForecastReport === oldDaily, "last-good UI data remains visible")
+                check(h.panel.hourlyUpdatedAt === updatedAt, "old data has not been marked fresh")
+                check(h.panel.weatherCache.dailyForecast === null, "new report does not retain the old daily cache")
+            })
+            control({ inspect: true, cache: testCase.tag + "-pending" })
+        }
+        if (h.scenario !== "auto-refresh-interrupted") {
+            until("replacement daily request follows current detected coordinates", function() {
+                if (testCase.forecastDelay < testCase.dailyDelay)
+                    check(h.panel.dailyForecastReport.fixture !== testCase.tag + "-obsolete", "obsolete response never replaces visible weather")
+                return h.panel.dailyForecastReport.fixture === testCase.tag + "-current" && networkIdle()
+                    && !h.panel.cacheWritePending && !h.panel.cacheWriteInFlight
+            })
+            action("only matching data becomes fresh", function() {
+                check(h.panel.dailyForecastReport.latitude === testCase.coordinates[0], "daily latitude matches the new wttr area")
+                check(h.panel.dailyForecastReport.longitude === testCase.coordinates[1], "daily longitude matches the new wttr area")
+                check(h.panel.dailyForecastRetries === 0 && !h.panel.hourlyFetchFailed, "obsolete success or failure does not consume retries")
+                check(h.panel.hourlyUpdatedAt > updatedAt, "current response advances freshness")
+            })
+            control({ inspect: true, cache: testCase.tag })
+        }
+    })
 }
 
 function autoCacheRestartScenario() {
