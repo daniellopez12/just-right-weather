@@ -58,6 +58,10 @@ Covered scenarios:
   cache bytes and timestamps after timeouts, rejection of a different saved
   location and a corrupt file, and replacement with valid matching responses.
   Cache directory/write failures are logged without breaking live weather.
+- Auto-mode restarts on a different network, with delayed wttr/Open-Meteo
+  responses: no requests use restored coordinates, both persisted payloads
+  identify the new area, an exit before the daily response leaves no
+  mixed-location cache, and daily retries reuse only live coordinates.
 - All four providers hang beyond their production deadlines. Actual curl
   timeout exits (28) and connection-close times enforce the 10/5/5/4-second
   limits while a native QML heartbeat and location editor remain responsive.

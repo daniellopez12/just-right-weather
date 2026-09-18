@@ -121,7 +121,7 @@ function startup() {
     })
     action("assert startup render tree", function() {
         h.panel.controller.show()
-        check(h.panel.reportTempNum === (["auto", "lookups", "schema", "timeouts"].indexOf(h.scenario) >= 0 ? "21" : "23"), "correct current-condition source")
+        check(h.panel.reportTempNum === (["auto", "lookups", "schema", "timeouts", "auto-cache"].indexOf(h.scenario) >= 0 ? "21" : "23"), "correct current-condition source")
         check(h.panel.forecastDays.length === 3, "three future forecast days")
         check(h.panel.hourlyEntries.filter(function(entry) { return entry.kind === "hour" }).length === 48, "48 hourly samples")
         check(h.panel.hourlyEntries.some(function(entry) { return entry.kind === "sunrise" }), "sunrise in hourly strip")
@@ -382,6 +382,10 @@ function schemaScenario() {
 
 function start(harness) {
     h = harness
+    if (h.scenario.indexOf("auto-cache-") === 0) {
+        autoCacheRestartScenario()
+        return
+    }
     if (h.scenario.indexOf("cache-") === 0 && h.scenario !== "cache-write-error") {
         cacheRestartScenario()
         return
@@ -401,14 +405,68 @@ function start(harness) {
     else if (h.scenario === "memory") memoryScenario()
     else if (h.scenario === "schema") schemaScenario()
     else if (h.scenario === "timeouts") timeoutsScenario()
-    else if (h.scenario === "cache" || h.scenario === "cache-write-error") {
+    else if (h.scenario === "cache" || h.scenario === "cache-write-error" || h.scenario === "auto-cache") {
         until("native cache writes settle", function() {
             return networkIdle() && !h.panel.cacheWriteInFlight && !h.panel.cacheWritePending
         })
         action("live weather survives cache writes", function() {
-            check(h.panel.reportTempNum === "23" && h.panel.hourlyEntries.length >= 48, "current and hourly weather remain visible")
+            check(h.panel.reportTempNum === (h.scenario === "auto-cache" ? "21" : "23") && h.panel.hourlyEntries.length >= 48, "current and hourly weather remain visible")
         })
     }
+}
+
+function autoCacheRestartScenario() {
+    var oldDaily
+    var updatedAt
+    action("restart auto mode on a different network", function() { h.loadPanel() })
+    until("cached auto weather restored before delayed wttr response", function() {
+        return h.panel && h.panel.weatherReady
+    }, 2000)
+    action("cached weather remains visible but does not establish current coordinates", function() {
+        check(h.panel.locationQuery === "" && !h.panel.hasConfiguredCoordinates, "auto mode restored")
+        check(h.panel.areaInfo.latitude === "40", "previous network's wttr area restored")
+        oldDaily = h.panel.dailyForecastReport
+        updatedAt = h.panel.hourlyUpdatedAt
+        check(oldDaily.latitude === 40 && h.panel.hourlyEntries.length >= 48, "previous network's daily and hourly data restored")
+        h.panel.refresh()
+    })
+    pause(150)
+    control({ inspect: true })
+    action("no old-coordinate daily request can race the live wttr response", function() {
+        check(h.panel.areaInfo.latitude === "40", "wttr is still delayed")
+        check(h.stats.requests.some(function(request) { return request.tag === h.scenario && request.kind === "forecast" }), "live wttr request started")
+        check(!h.stats.requests.some(function(request) { return request.tag === h.scenario && request.kind === "daily" }), "restored auto area did not launch Open-Meteo")
+    })
+    until("new network's wttr report has been cached", function() {
+        return h.panel.report.fixture === h.scenario && !h.panel.cacheWritePending && !h.panel.cacheWriteInFlight
+    })
+    action("partial refresh does not mix persisted locations", function() {
+        check(h.panel.areaInfo.latitude === "44", "live wttr supplies new coordinates")
+        check(h.panel.dailyForecastReport === oldDaily && h.panel.hourlyUpdatedAt === updatedAt, "last-good daily data remains visible without becoming fresh")
+        check(h.panel.weatherCache.dailyForecast === null, "old-network daily payload removed from new-network disk cache")
+    })
+    if (h.scenario === "auto-cache-interrupted") {
+        control({ inspect: true })
+        action("exit while matching Open-Meteo request is still pending", function() {
+            check(h.stats.requests.some(function(request) { return request.tag === h.scenario && request.kind === "daily" }), "matching daily request started")
+            check(!networkIdle(), "daily response is still delayed at shell exit")
+        })
+        return
+    }
+    if (h.scenario === "auto-cache-retry") {
+        until("daily failure schedules normal retry", function() { return h.panel.dailyForecastRetries === 1 && h.panel.hourlyFetchFailed })
+        action("failed daily refresh preserves only matching cache identity", function() {
+            check(h.panel.weatherCache.dailyForecast === null, "failed daily request cannot restore the old-network cache entry")
+        })
+    }
+    until("matching daily data and native cache writes settle", function() {
+        return h.panel.dailyForecastReport.fixture === h.scenario && networkIdle()
+            && !h.panel.cacheWritePending && !h.panel.cacheWriteInFlight
+    }, 8000)
+    action("new provider payloads share the detected location", function() {
+        check(h.panel.dailyForecastReport.latitude === 44 && h.panel.dailyForecastReport.longitude === -79, "daily response belongs to the live wttr coordinates")
+        check(h.panel.hourlyUpdatedAt > updatedAt && !h.panel.hourlyFetchFailed, "matching live daily response advances freshness")
+    })
 }
 
 function cacheRestartScenario() {

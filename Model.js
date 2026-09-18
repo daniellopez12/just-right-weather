@@ -267,6 +267,16 @@ function updatedWeatherCache(previous, locationQuery, source, data, updatedAt) {
   if (source !== "report" && source !== "dailyForecast")
     throw new Error("Unknown weather cache source")
   var matching = previous && previous.locationQuery === locationQuery
+  if (matching && locationQuery === "" && source === "report") {
+    // An empty query identifies auto mode, not a location. Do not retain the
+    // previous area's daily payload while its replacement is still in flight.
+    var oldReport = previous.report && previous.report.data
+    var oldArea = oldReport && oldReport.nearest_area && oldReport.nearest_area[0]
+    var newArea = data && data.nearest_area && data.nearest_area[0]
+    matching = oldArea && newArea
+      && parseFloat(oldArea.latitude) === parseFloat(newArea.latitude)
+      && parseFloat(oldArea.longitude) === parseFloat(newArea.longitude)
+  }
   var cache = {
     version: 1,
     locationQuery: locationQuery,

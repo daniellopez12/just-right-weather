@@ -75,6 +75,7 @@ Panel {
   // Parsed wttr.in j1 response. Kept on failure so stale data stays visible.
   property var report: null
   property string reportLocationQuery: ""
+  property bool reportIsLive: false
   property var dailyForecastReport: null
   property double forecastClock: Date.now()
   property double hourlyUpdatedAt: 0
@@ -188,6 +189,7 @@ Panel {
   // editor remains open with a spinner, so stale data is never presented
   // under the newly configured location label.
   onLocationQueryChanged: {
+    reportIsLive = false
     if (!weatherReady) return
     if (savingLocation) savingLocationQueryStarted = true
     forecastRetries = 0
@@ -292,8 +294,12 @@ Panel {
     var lat = parseFloat(String(root.configuredLocationState.latitude))
     var lon = parseFloat(String(root.configuredLocationState.longitude))
     if (isNaN(lat) || isNaN(lon)) {
+      // Cached auto coordinates may belong to a previous network. Only a live
+      // wttr response can establish them for this session (including retries).
+      var canReuseArea = reportLocationQuery === locationQuery
+        && (locationQuery !== "" || reportIsLive)
       var area = sourceReport && sourceReport.nearest_area && sourceReport.nearest_area[0]
-        ? sourceReport.nearest_area[0] : (reportLocationQuery === locationQuery ? root.areaInfo : null)
+        ? sourceReport.nearest_area[0] : (canReuseArea ? root.areaInfo : null)
       if (!area) return
       lat = parseFloat(String(area.latitude || ""))
       lon = parseFloat(String(area.longitude || ""))
@@ -560,6 +566,7 @@ Panel {
           throw new Error("No current conditions in weather response")
         root.report = parsed
         root.reportLocationQuery = root.locationQuery
+        root.reportIsLive = true
         root.cacheWeatherResponse("report", parsed, Date.now())
         if (!root.hasConfiguredCoordinates)
           root.label = Model.provisionalCurrentIcon(parsed.current_condition && parsed.current_condition[0], root.label)

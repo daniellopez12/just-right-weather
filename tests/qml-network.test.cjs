@@ -30,6 +30,8 @@ function payload(kind, url) {
   };
   if (kind === "daily") return {
     fixture: "good",
+    latitude: Number(url.searchParams.get("latitude")),
+    longitude: Number(url.searchParams.get("longitude")),
     utc_offset_seconds: 0,
     current: { temperature_2m: 23, apparent_temperature: 22, relative_humidity_2m: 55, wind_speed_10m: 12, weather_code: 0, is_day: 1 },
     daily: { time: dates, weather_code: dates.map(() => 0), temperature_2m_max: dates.map(() => 26), temperature_2m_min: dates.map(() => 14), sunrise: dates.map(date => `${date}T06:00`), sunset: dates.map(date => `${date}T18:00`) },
@@ -62,7 +64,7 @@ function prepare(work, scenario, address) {
   }
   const settings = path.join(work, "home/.local/state/omarchy/settings");
   fs.mkdirSync(settings, { recursive: true });
-  if (!["auto", "lookups", "schema", "timeouts"].includes(scenario))
+  if (!["auto", "lookups", "schema", "timeouts", "auto-cache"].includes(scenario))
     fs.writeFileSync(path.join(settings, "weather.json"), JSON.stringify({ name: "Initial City", latitude: 40, longitude: -75 }));
 
   // A whitelist-only PATH means the real location helper can never execute.
@@ -161,6 +163,10 @@ async function runScenario(scenario) {
       const send = () => {
         let value = payload(kind, upstream);
         if (typeof value === "object") value.fixture = options.marker || record.tag || "good";
+        if (options.coordinates && kind === "forecast") {
+          value.nearest_area[0].latitude = String(options.coordinates[0]);
+          value.nearest_area[0].longitude = String(options.coordinates[1]);
+        }
         if (options.temperature && kind === "daily") value.current.temperature_2m = options.temperature;
         if (options.temperature && kind === "forecast") value.current_condition[0].temp_C = String(options.temperature);
         if (record.mode === "api-error") value = { error: true, reason: "Fixture error" };
@@ -200,10 +206,18 @@ async function runScenario(scenario) {
     const cachePath = path.join(work, "cache/just-right-weather/forecast.json");
     if (scenario === "cache-write-error")
       fs.writeFileSync(path.dirname(cachePath), "A file blocks cache directory creation");
-    const phases = scenario === "cache" ? ["cache", "cache-offline", "cache-mismatch", "cache-corrupt"] : [scenario];
+    const phases = scenario === "cache" ? ["cache", "cache-offline", "cache-mismatch", "cache-corrupt"]
+      : scenario === "auto-cache" ? ["auto-cache", "auto-cache-moved", "auto-cache-interrupted", "auto-cache-retry"] : [scenario];
     let savedCache;
     for (const phase of phases) {
-      if (phase === "cache-offline") {
+      if (phase.startsWith("auto-cache-")) {
+        fs.writeFileSync(cachePath, savedCache);
+        plan = {
+          tag: phase,
+          forecast: { mode: "good", delay: 800, coordinates: [44, -79] },
+          daily: [{ mode: phase === "auto-cache-retry" ? "http" : "good", delay: 1600 }, "good"],
+        };
+      } else if (phase === "cache-offline") {
         savedCache = fs.readFileSync(cachePath, "utf8");
         plan = { tag: phase, fallback: { mode: "http", delay: 15000 } };
       } else if (phase === "cache-mismatch") {
@@ -238,6 +252,26 @@ async function runScenario(scenario) {
       });
       assert.equal(result.code, 0, output);
       assert.match(output, new RegExp(`WEATHER_E2E_PASS ${phase} \\d+ assertions`), output);
+      if (phase === "auto-cache") {
+        savedCache = fs.readFileSync(cachePath, "utf8");
+        const saved = JSON.parse(savedCache);
+        assert.equal(saved.locationQuery, "");
+        assert.equal(saved.report.data.nearest_area[0].latitude, "40");
+        assert.equal(saved.dailyForecast.data.latitude, 40);
+      } else if (phase.startsWith("auto-cache-")) {
+        const saved = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+        assert.equal(saved.locationQuery, "");
+        assert.equal(saved.report.data.fixture, phase);
+        assert.equal(saved.report.data.nearest_area[0].latitude, "44");
+        assert.equal(saved.report.data.nearest_area[0].longitude, "-79");
+        if (phase === "auto-cache-interrupted") {
+          assert.equal(saved.dailyForecast, null, "An interrupted refresh must not persist an old-location daily payload");
+        } else {
+          assert.equal(saved.dailyForecast.data.fixture, phase);
+          assert.equal(saved.dailyForecast.data.latitude, 44, "The cached daily payload must belong to the live wttr area");
+          assert.equal(saved.dailyForecast.data.longitude, -79);
+        }
+      }
       if (phase === "cache-offline")
         assert.equal(fs.readFileSync(cachePath, "utf8"), savedCache, "Timeouts must not overwrite the disk cache");
       if (phase === "cache-mismatch" || phase === "cache-corrupt") {
@@ -346,6 +380,21 @@ test("native QML restores disk cache across real offline restarts and rejects mi
   assert.match(output, /Request failed with exit code 28/);
   for (const kind of ["forecast", "daily"])
     assert.ok(requests.some(request => request.kind === kind && request.tag === "cache-offline" && request.cancelled));
+});
+
+test("native QML auto-mode restart waits for live coordinates and keeps moved-network cache payloads consistent", async () => {
+  const { requests } = await runScenario("auto-cache");
+  for (const phase of ["auto-cache-moved", "auto-cache-interrupted", "auto-cache-retry"]) {
+    const daily = requests.filter(request => request.tag === phase && request.kind === "daily");
+    assert.equal(daily.length, phase === "auto-cache-retry" ? 2 : 1);
+    for (const request of daily) {
+      const url = new URL(request.url);
+      assert.equal(url.searchParams.get("latitude"), "44");
+      assert.equal(url.searchParams.get("longitude"), "-79");
+    }
+  }
+  assert.ok(requests.some(request => request.tag === "auto-cache-interrupted" && request.kind === "daily" && request.cancelled));
+  assert.deepEqual(requests.filter(request => request.tag === "auto-cache-retry" && request.kind === "daily").map(request => request.mode), ["http", "good"]);
 });
 
 test("native QML cache write errors are logged without discarding live weather", async () => {

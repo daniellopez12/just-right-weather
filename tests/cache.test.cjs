@@ -46,6 +46,24 @@ test("expired hourly windows remain valid cached data without becoming fresh aga
   assert.equal(saved.dailyForecast.updatedAt, fetchedAt + 1);
 });
 
+test("auto-mode cache keeps daily payloads only when live wttr coordinates still match", () => {
+  const at = (latitude, longitude) => ({ ...report, nearest_area: [{ latitude, longitude }] });
+  const previous = Model.updatedWeatherCache(
+    Model.updatedWeatherCache(null, "", "report", at("40", "-75"), fetchedAt),
+    "", "dailyForecast", daily, fetchedAt + 1);
+  const same = Model.updatedWeatherCache(previous, "", "report", at("40.000", -75), fetchedAt + 2);
+  assert.equal(same.dailyForecast, previous.dailyForecast);
+  for (const nextReport of [at("44", "-79"), at("40", "-79"), at("44", "-75"), report, at(null, null)]) {
+    const moved = Model.updatedWeatherCache(previous, "", "report", nextReport, fetchedAt + 2);
+    assert.equal(moved.dailyForecast, null);
+    assert.deepEqual(moved.report.data, nextReport);
+    assert.deepEqual(Model.parseWeatherCache(JSON.stringify(moved)), moved);
+  }
+  assert.equal(previous.dailyForecast.data, daily, "Changing the cache must not mutate displayed stale data");
+  const dailyOnly = Model.updatedWeatherCache(null, "", "dailyForecast", daily, fetchedAt);
+  assert.equal(Model.updatedWeatherCache(dailyOnly, "", "report", at("44", "-79"), fetchedAt + 1).dailyForecast, null);
+});
+
 test("malformed, unsupported and schema-invalid cache files are rejected", () => {
   for (const raw of ["", "{", "null", "[]", "{}"]) {
     assert.throws(() => Model.parseWeatherCache(raw));
