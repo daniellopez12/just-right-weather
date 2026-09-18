@@ -238,6 +238,55 @@ function weatherResponseCompletesSave(hasConfiguredCoordinates, source) {
   return hasConfiguredCoordinates ? source === "open-meteo" : source === "wttr"
 }
 
+function validWeatherReport(report) {
+  return !!report && Array.isArray(report.current_condition)
+    && !!report.current_condition[0] && typeof report.current_condition[0] === "object"
+    && !Array.isArray(report.current_condition[0])
+}
+
+function parseWeatherCache(raw) {
+  var cache = JSON.parse(raw)
+  if (!cache || cache.version !== 1 || typeof cache.locationQuery !== "string"
+      || (!cache.report && !cache.dailyForecast))
+    throw new Error("Invalid weather cache format")
+
+  ;["report", "dailyForecast"].forEach(function(source) {
+    var entry = cache[source]
+    if (entry === null) return
+    if (!entry || typeof entry.updatedAt !== "number" || !isFinite(entry.updatedAt)
+        || entry.updatedAt <= 0 || !entry.data)
+      throw new Error("Invalid cached weather timestamp or payload")
+    if (source === "report" ? !validWeatherReport(entry.data)
+        : entry.data.error || hourlyForecast(entry.data, entry.updatedAt, 48).length === 0)
+      throw new Error("Invalid cached " + source)
+  })
+  return cache
+}
+
+function updatedWeatherCache(previous, locationQuery, source, data, updatedAt) {
+  if (source !== "report" && source !== "dailyForecast")
+    throw new Error("Unknown weather cache source")
+  var matching = previous && previous.locationQuery === locationQuery
+  if (matching && locationQuery === "" && source === "report") {
+    // An empty query identifies auto mode, not a location. Do not retain the
+    // previous area's daily payload while its replacement is still in flight.
+    var oldReport = previous.report && previous.report.data
+    var oldArea = oldReport && oldReport.nearest_area && oldReport.nearest_area[0]
+    var newArea = data && data.nearest_area && data.nearest_area[0]
+    matching = oldArea && newArea
+      && parseFloat(oldArea.latitude) === parseFloat(newArea.latitude)
+      && parseFloat(oldArea.longitude) === parseFloat(newArea.longitude)
+  }
+  var cache = {
+    version: 1,
+    locationQuery: locationQuery,
+    report: matching ? previous.report : null,
+    dailyForecast: matching ? previous.dailyForecast : null
+  }
+  cache[source] = { updatedAt: updatedAt, data: data }
+  return cache
+}
+
 function wttrNextForecastDays(report, todayString) {
   var days = report && report.weather ? report.weather : []
   var result = []
@@ -407,6 +456,9 @@ if (typeof module !== "undefined") {
     currentIcon: currentIcon,
     provisionalCurrentIcon: provisionalCurrentIcon,
     weatherResponseCompletesSave: weatherResponseCompletesSave,
+    validWeatherReport: validWeatherReport,
+    parseWeatherCache: parseWeatherCache,
+    updatedWeatherCache: updatedWeatherCache,
     wttrNextForecastDays: wttrNextForecastDays,
     buildForecastDays: buildForecastDays,
     bareTempForDay: bareTempForDay,

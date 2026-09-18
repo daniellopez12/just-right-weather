@@ -82,6 +82,19 @@ not write a location, change a theme, or replace your other settings.
 When a refresh fails, the last hourly forecast remains visible with a warning.
 Missing hourly values appear as dashes rather than zero rainfall.
 
+Successful weather responses are also cached on disk. After a shell restart or
+login, the last saved current conditions, icon, and forecasts appear as soon as
+the local files load, before waiting for the network. Cached data is restored
+only for the same configured location (or the same IP-auto-detect mode), and
+retains its original fetch time so outdated forecasts still show a warning.
+IP-auto-detected weather may describe your previous location until a refresh
+succeeds after you move networks. After a restart, auto mode waits for live wttr
+coordinates before requesting Open-Meteo. Every daily response is also checked
+against the current request coordinates, so in-flight responses from a previous
+area cannot overwrite the cache during later refreshes. If the detected area
+changes, the old daily payload stays visible but is removed from the disk cache until its
+replacement succeeds. The first run still needs a successful fetch.
+
 The shell lifecycle commands use the permanent ID:
 
 ```sh
@@ -120,6 +133,15 @@ The plugin reuses your local
 is never bundled. Without a configured location, wttr.in estimates one from
 your public IP address.
 
+The last successful provider payloads, their fetch timestamps, and a location
+query are stored locally in `$XDG_CACHE_HOME/just-right-weather/forecast.json`
+(default `~/.cache/just-right-weather/forecast.json`). This file includes location
+information returned by the providers; it is not uploaded or bundled with the
+plugin. Reads and atomic writes are asynchronous. Failed requests never replace
+the cache; corrupt or incompatible caches are logged and ignored, and cache
+write errors are logged without discarding live weather. You may delete this
+file to clear the saved forecast.
+
 | Service | When contacted | Information sent |
 | --- | --- | --- |
 | [wttr.in](https://wttr.in) | Weather refresh; IP auto-detection when no location is set | Configured coordinates or place name, or your public IP for auto-detection |
@@ -154,14 +176,31 @@ omarchy plugin disable io.github.daniellopez12.just-right-weather
 omarchy plugin remove io.github.daniellopez12.just-right-weather
 ```
 
-Removal leaves the shared Omarchy weather location intact. If you explicitly
-disabled the built-in weather widget earlier, restore it with:
+Removal leaves the shared Omarchy weather location and the local forecast cache
+intact. If you explicitly disabled the built-in weather widget earlier, restore
+it with:
 
 ```sh
 omarchy plugin enable omarchy.weather --section center
 ```
 
-## Security updates
+## Release notes
+
+### 1.0.3 - Persistent weather cache
+
+Successful weather responses are saved with asynchronous, atomic disk writes
+and restored after a shell restart before waiting for the network. The cache
+is matched to the configured location, preserves original fetch timestamps, and
+retains the last good forecast when a request fails. Invalid caches and write
+failures are logged without blocking live weather.
+
+Obsolete weather responses cannot overwrite the cache after a location change.
+Existing hard request timeouts and response-size limits are unchanged. Native
+regressions cover offline restarts, invalid caches, write failures, and all four
+HTTP timeouts while the QML event loop remains responsive. The maintainer
+workflow for publishing a newly verified marketplace commit is documented below.
+
+### Earlier security updates
 
 Version 1.0.2 caps all four plugin HTTP response bodies before collection and
 rejects failed, oversized, or incomplete transfers before parsing or updating
@@ -202,6 +241,30 @@ test services, without changing your desktop or saved location. See
 
 Follow the [Omarchy development guide](https://plugins.omarchy.org/develop.html)
 and [publishing guide](https://plugins.omarchy.org/publish.html).
+
+### Publishing updates to a verified listing
+
+Marketplace verification covers an **exact commit**, not every future commit
+in this repository. This is a publishing workflow, not a `manifest.json` flag.
+Editing the original submission issue does not publish a verified update.
+
+1. Finish the release changes, update the manifest version when releasing, and
+   push the final commit to the repository's default branch. Record its full
+   40-character SHA.
+2. Open a **new** request using the marketplace's
+   [Verify or update a listed plugin form](https://github.com/omacom/omarchy-plugin-marketplace/issues/new?template=verify-plugin.yml).
+   Choose **Verify and publish a newer upstream commit**, enter plugin ID
+   `io.github.daniellopez12.just-right-weather`, this repository's URL, and the
+   exact target SHA, then complete the verification acknowledgment.
+3. Wait for validation and any required maintainer review/promotion. Confirm the
+   marketplace's verified commit matches the intended release. Further commits
+   require another update request; pushing alone does not extend verification.
+
+The marketplace runs a
+[daily upstream refresh](https://github.com/omacom/omarchy-plugin-marketplace/blob/main/.github/workflows/refresh-catalog.yml).
+An upstream commit beyond the verified snapshot can be marked **Update
+unverified** rather than covered by the Verified filter. Verification is not a
+security audit, certification, or endorsement.
 
 ## Credits and license
 
