@@ -74,6 +74,7 @@ Panel {
 
   // Parsed wttr.in j1 response. Kept on failure so stale data stays visible.
   property var report: null
+  property string reportLocationQuery: ""
   property var dailyForecastReport: null
   property double forecastClock: Date.now()
   property double hourlyUpdatedAt: 0
@@ -86,6 +87,87 @@ Panel {
     : (hourlyUpdatedAt > 0 && forecastClock - hourlyUpdatedAt > root.refreshMinutes * 120000
       ? "Forecast may be outdated \u00b7 Middle-click weather to retry" : "")
   property string wttrLocation: ""
+  property bool locationReady: false
+  property bool cacheReady: false
+  property bool weatherReady: false
+  property var weatherCache: null
+  property bool cacheWritePending: false
+  property bool cacheWriteInFlight: false
+  readonly property string weatherCachePath: (Quickshell.env("XDG_CACHE_HOME")
+    || Quickshell.env("HOME") + "/.cache") + "/just-right-weather/forecast.json"
+
+  function initializeWeather() {
+    if (weatherReady || !locationReady || !cacheReady) return
+    if (weatherCache && weatherCache.locationQuery === locationQuery) {
+      if (weatherCache.report) {
+        report = weatherCache.report.data
+        reportLocationQuery = weatherCache.locationQuery
+      }
+      if (weatherCache.dailyForecast) {
+        dailyForecastReport = weatherCache.dailyForecast.data
+        hourlyUpdatedAt = weatherCache.dailyForecast.updatedAt
+        hourlyLocationQuery = weatherCache.locationQuery
+      }
+      label = Model.currentIcon(openMeteoCurrent, Model.currentIcon(current, ""))
+    }
+    // Restore before starting any network request, without blocking the shell.
+    weatherReady = true
+  }
+
+  function cacheWeatherResponse(source, data, updatedAt) {
+    weatherCache = Model.updatedWeatherCache(weatherCache, locationQuery, source, data, updatedAt)
+    cacheWritePending = true
+    Qt.callLater(writeWeatherCache)
+  }
+
+  function writeWeatherCache() {
+    if (cacheWriteInFlight || !cacheWritePending) return
+    cacheWritePending = false
+    try {
+      var text = Network.responseText(JSON.stringify(weatherCache), 0, 0, 512 * 1024)
+      // FileView does not emit saved for identical content.
+      if (text === weatherCacheFile.text()) return
+      cacheWriteInFlight = true
+      weatherCacheFile.setText(text)
+    } catch (e) {
+      cacheWriteInFlight = false
+      console.warn("Weather cache write failed: " + e)
+    }
+  }
+
+  FileView {
+    id: weatherCacheFile
+    path: root.weatherCachePath
+    blockLoading: false
+    blockWrites: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      if (root.cacheReady) return
+      try {
+        root.weatherCache = Model.parseWeatherCache(Network.responseText(text(), 0, 0, 512 * 1024))
+      } catch (e) {
+        console.warn("Weather cache load failed: " + e)
+      }
+      root.cacheReady = true
+      Qt.callLater(root.initializeWeather)
+    }
+    onLoadFailed: function(error) {
+      if (error !== FileViewError.FileNotFound)
+        console.warn("Weather cache load failed: " + FileViewError.toString(error))
+      root.cacheReady = true
+      Qt.callLater(root.initializeWeather)
+    }
+    onSaved: {
+      root.cacheWriteInFlight = false
+      if (root.cacheWritePending) Qt.callLater(root.writeWeatherCache)
+    }
+    onSaveFailed: function(error) {
+      root.cacheWriteInFlight = false
+      console.warn("Weather cache write failed: " + FileViewError.toString(error))
+      if (root.cacheWritePending) Qt.callLater(root.writeWeatherCache)
+    }
+  }
 
   Timer {
     interval: 60000
@@ -106,9 +188,12 @@ Panel {
   // editor remains open with a spinner, so stale data is never presented
   // under the newly configured location label.
   onLocationQueryChanged: {
+    if (!weatherReady) return
     if (savingLocation) savingLocationQueryStarted = true
     forecastRetries = 0
     dailyForecastRetries = 0
+    forecastRetryTimer.stop()
+    dailyForecastRetryTimer.stop()
     forecastProc.running = false
     dailyForecastProc.running = false
     Qt.callLater(refresh)
@@ -119,8 +204,14 @@ Panel {
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
-    onLoaded: root.configuredLocationState = Model.parseLocationFile(text())
-    onLoadFailed: root.configuredLocationState = Model.parseLocationFile("")
+    onLoaded: root.loadConfiguredLocation(text())
+    onLoadFailed: root.loadConfiguredLocation("")
+  }
+
+  function loadConfiguredLocation(text) {
+    configuredLocationState = Model.parseLocationFile(text)
+    locationReady = true
+    Qt.callLater(initializeWeather)
   }
 
   // The first read can race shell startup (observed sporadically), leaving a
@@ -174,18 +265,25 @@ Panel {
   readonly property string reportHumidity:  current ? (current.humidity + "%") : ""
 
   function refresh() {
+    if (!weatherReady) return
     forecastClock = Date.now()
     // Each full refresh cycle gets a fresh retry budget, so an earlier
     // exhausted round (e.g. waking with the network still down) doesn't
     // starve retries for the rest of the session.
     forecastRetries = 0
     dailyForecastRetries = 0
-    if (!forecastProc.running) forecastProc.running = true
+    refreshForecast()
     if (root.locationQuery === "" && !locationProc.running) locationProc.running = true
     // With stored coordinates this fetches open-meteo right away — no need
     // to wait for the slow wttr response. Without them it's a no-op until
     // wttr reports the detected area.
     refreshDailyForecast(null)
+  }
+
+  function refreshForecast() {
+    if (forecastProc.running) return
+    forecastProc.requestQuery = locationQuery
+    forecastProc.running = true
   }
 
   function refreshDailyForecast(sourceReport) {
@@ -194,7 +292,8 @@ Panel {
     var lat = parseFloat(String(root.configuredLocationState.latitude))
     var lon = parseFloat(String(root.configuredLocationState.longitude))
     if (isNaN(lat) || isNaN(lon)) {
-      var area = sourceReport && sourceReport.nearest_area && sourceReport.nearest_area[0] ? sourceReport.nearest_area[0] : root.areaInfo
+      var area = sourceReport && sourceReport.nearest_area && sourceReport.nearest_area[0]
+        ? sourceReport.nearest_area[0] : (reportLocationQuery === locationQuery ? root.areaInfo : null)
       if (!area) return
       lat = parseFloat(String(area.latitude || ""))
       lon = parseFloat(String(area.longitude || ""))
@@ -210,6 +309,7 @@ Panel {
       + "&forecast_days=4"
       + "&timezone=auto"
     dailyForecastProc.command = Network.curlCommand(url, 5, Network.responseLimits.dailyForecast)
+    dailyForecastProc.requestQuery = locationQuery
     dailyForecastProc.running = true
   }
 
@@ -439,6 +539,7 @@ Panel {
 
   Process {
     id: forecastProc
+    property string requestQuery: ""
     command: Network.curlCommand("https://wttr.in/" + root.locationQuery + "?format=j1",
       10, Network.responseLimits.forecast)
     stdout: StdioCollector {
@@ -447,15 +548,19 @@ Panel {
     }
     // Quickshell finishes the collector before emitting exited.
     onExited: function(exitCode, exitStatus) {
+      if (requestQuery !== root.locationQuery) {
+        Qt.callLater(root.refreshForecast)
+        return
+      }
       try {
         var raw = Network.responseText(forecastOutput.text, exitCode,
           exitStatus, Network.responseLimits.forecast)
         var parsed = JSON.parse(raw)
-        if (!parsed || !Array.isArray(parsed.current_condition)
-            || !parsed.current_condition[0] || typeof parsed.current_condition[0] !== "object"
-            || Array.isArray(parsed.current_condition[0]))
+        if (!Model.validWeatherReport(parsed))
           throw new Error("No current conditions in weather response")
         root.report = parsed
+        root.reportLocationQuery = root.locationQuery
+        root.cacheWeatherResponse("report", parsed, Date.now())
         if (!root.hasConfiguredCoordinates)
           root.label = Model.provisionalCurrentIcon(parsed.current_condition && parsed.current_condition[0], root.label)
         root.forecastRetries = 0
@@ -484,7 +589,7 @@ Panel {
   Timer {
     id: forecastRetryTimer
     interval: 2500
-    onTriggered: if (!forecastProc.running) forecastProc.running = true
+    onTriggered: root.refreshForecast()
   }
 
   // With configured coordinates this fetch is the only thing that updates the
@@ -504,11 +609,16 @@ Panel {
 
   Process {
     id: dailyForecastProc
+    property string requestQuery: ""
     stdout: StdioCollector {
       id: dailyForecastOutput
       waitForEnd: true
     }
     onExited: function(exitCode, exitStatus) {
+      if (requestQuery !== root.locationQuery) {
+        Qt.callLater(root.refreshDailyForecast, null)
+        return
+      }
       try {
         var raw = Network.responseText(dailyForecastOutput.text, exitCode,
           exitStatus, Network.responseLimits.dailyForecast)
@@ -521,6 +631,7 @@ Panel {
         root.forecastClock = Date.now()
         root.hourlyUpdatedAt = root.forecastClock
         root.hourlyLocationQuery = root.locationQuery
+        root.cacheWeatherResponse("dailyForecast", parsed, root.hourlyUpdatedAt)
         root.hourlyFetchFailed = false
         root.label = Model.currentIcon(parsedCurrent, root.label)
         root.dailyForecastRetries = 0
@@ -619,7 +730,7 @@ Panel {
   Timer {
     id: refreshTimer
     interval: root.refreshMinutes * 60 * 1000
-    running: true
+    running: root.weatherReady
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refresh()

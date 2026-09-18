@@ -13,6 +13,7 @@ ShellRoot {
     property int stepIndex: 0
     property double stepStarted: 0
     property int assertions: 0
+    property int ticks: 0
     property bool finished: false
     property bool controlled: false
     property var stats: null

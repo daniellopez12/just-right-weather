@@ -8,7 +8,7 @@ node --test tests/qml-network.test.cjs
 
 Requires Linux, Node.js (the built-in test runner), and
 `/usr/bin/{quickshell,curl,python3}` with Qt Quick and its offscreen platform
-plugin. The seven scenarios take approximately 50 seconds. Missing prerequisites
+plugin. The suite takes approximately 80 seconds. Missing prerequisites
 fail explicitly rather than silently skipping native coverage.
 
 ## What runs
@@ -53,6 +53,14 @@ Covered scenarios:
   first current condition) do not replace the last-good report or visible
   current conditions. Each case recovers through the real scheduled retry with
   the normal provider shape, `current_condition: [{ ... }]`.
+- Real process restarts sharing only isolated disk state: cache creation,
+  immediate offline restoration before hung weather requests finish, unchanged
+  cache bytes and timestamps after timeouts, rejection of a different saved
+  location and a corrupt file, and replacement with valid matching responses.
+  Cache directory/write failures are logged without breaking live weather.
+- All four providers hang beyond their production deadlines. Actual curl
+  timeout exits (28) and connection-close times enforce the 10/5/5/4-second
+  limits while a native QML heartbeat and location editor remain responsive.
 
 To collect just the native process memory evidence:
 

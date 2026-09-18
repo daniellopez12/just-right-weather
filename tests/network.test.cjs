@@ -25,7 +25,7 @@ function processSource(name) {
 }
 
 function runExitHandler(name, raw, exitCode = 0, exitStatus = 0, overrides = {}) {
-  const state = { parses: 0, searches: 0, retries: 0, dailyRetries: 0, saves: 0, refreshes: 0, warnings: [], queued: [] };
+  const state = { parses: 0, searches: 0, retries: 0, dailyRetries: 0, saves: 0, refreshes: 0, warnings: [], queued: [], cached: [] };
   const previousReport = { previous: "weather" };
   const previousDaily = { previous: "daily" };
   const root = {
@@ -52,6 +52,7 @@ function runExitHandler(name, raw, exitCode = 0, exitStatus = 0, overrides = {})
     finishSavingLocation() { state.saves++; },
     refreshDailyForecast() { state.refreshes++; },
     startGeocode() {},
+    cacheWeatherResponse(source, data, updatedAt) { state.cached.push({ source, data, updatedAt }); },
     ...overrides
   };
   const source = processSource(name);
@@ -59,6 +60,7 @@ function runExitHandler(name, raw, exitCode = 0, exitStatus = 0, overrides = {})
   assert.ok(handler, `${name} must consume output in onExited`);
   const sandbox = {
     root,
+    requestQuery: "current-query",
     Network,
     Model: {
       ...Model,
@@ -166,6 +168,7 @@ test("all consumers reject failed, oversized and empty output before parsing or 
       assert.equal(root.hourlyLocationQuery, "previous-query", name);
       assert.equal(state.saves, 0, name);
       assert.equal(state.refreshes, 0, name);
+      assert.equal(state.cached.length, 0, name);
       assert.equal(state.warnings.length, 1, name);
       assert.equal(state.retries, name === "forecast" ? 1 : 0);
       assert.equal(state.dailyRetries, name === "dailyForecast" ? 1 : 0);

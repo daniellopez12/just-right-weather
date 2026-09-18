@@ -62,7 +62,7 @@ function prepare(work, scenario, address) {
   }
   const settings = path.join(work, "home/.local/state/omarchy/settings");
   fs.mkdirSync(settings, { recursive: true });
-  if (!["auto", "lookups", "schema"].includes(scenario))
+  if (!["auto", "lookups", "schema", "timeouts"].includes(scenario))
     fs.writeFileSync(path.join(settings, "weather.json"), JSON.stringify({ name: "Initial City", latitude: 40, longitude: -75 }));
 
   // A whitelist-only PATH means the real location helper can never execute.
@@ -151,9 +151,11 @@ async function runScenario(scenario) {
       const options = typeof configured === "string" ? { mode: configured } : configured;
       const record = { kind, url: upstream.href, limit: budgets[kind], timeout: timeouts[kind], mode: options.mode || "good", tag: plan.tag || "" };
       requests.push(record);
+      const started = Date.now();
       let timer;
       response.on("close", () => {
         record.cancelled = !response.writableEnded;
+        record.elapsedMs = Date.now() - started;
         clearTimeout(timer);
       });
       const send = () => {
@@ -195,35 +197,61 @@ async function runScenario(scenario) {
   try {
     await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
     const environment = prepare(work, scenario, `http://127.0.0.1:${server.address().port}`);
-    const result = await new Promise((resolve, reject) => {
-      const child = spawn("/usr/bin/quickshell", ["--no-color", "--path", path.join(work, "shell.qml")], {
-        cwd: work, env: environment, stdio: ["ignore", "pipe", "pipe"],
+    const cachePath = path.join(work, "cache/just-right-weather/forecast.json");
+    if (scenario === "cache-write-error")
+      fs.writeFileSync(path.dirname(cachePath), "A file blocks cache directory creation");
+    const phases = scenario === "cache" ? ["cache", "cache-offline", "cache-mismatch", "cache-corrupt"] : [scenario];
+    let savedCache;
+    for (const phase of phases) {
+      if (phase === "cache-offline") {
+        savedCache = fs.readFileSync(cachePath, "utf8");
+        plan = { tag: phase, fallback: { mode: "http", delay: 15000 } };
+      } else if (phase === "cache-mismatch") {
+        fs.writeFileSync(path.join(work, "home/.local/state/omarchy/settings/weather.json"),
+          JSON.stringify({ name: "Different City", latitude: 44, longitude: -79 }));
+        plan = { tag: phase, fallback: { mode: "good", delay: 800 } };
+      } else if (phase === "cache-corrupt") {
+        fs.writeFileSync(cachePath, '{"partial":');
+        plan = { tag: phase, fallback: { mode: "good", delay: 800 } };
+      }
+      const result = await new Promise((resolve, reject) => {
+        const child = spawn("/usr/bin/quickshell", ["--no-color", "--path", path.join(work, "shell.qml")], {
+          cwd: work, env: { ...environment, WEATHER_E2E_SCENARIO: phase }, stdio: ["ignore", "pipe", "pipe"],
+        });
+        nativePid = child.pid;
+        let timedOut = false;
+        let killTimer;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGTERM");
+          killTimer = setTimeout(() => child.kill("SIGKILL"), 2000);
+        }, 120000);
+        child.stdout.on("data", chunk => { output += chunk; });
+        child.stderr.on("data", chunk => { output += chunk; });
+        child.on("error", error => { clearTimeout(timer); clearTimeout(killTimer); reject(error); });
+        child.on("exit", (code, signal) => {
+          clearTimeout(timer);
+          clearTimeout(killTimer);
+          if (timedOut) reject(new Error("Native QML timeout\n" + output));
+          else resolve({ code, signal });
+        });
       });
-      nativePid = child.pid;
-      let timedOut = false;
-      let killTimer;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-        killTimer = setTimeout(() => child.kill("SIGKILL"), 2000);
-      }, 120000);
-      child.stdout.on("data", chunk => { output += chunk; });
-      child.stderr.on("data", chunk => { output += chunk; });
-      child.on("error", error => { clearTimeout(timer); clearTimeout(killTimer); reject(error); });
-      child.on("exit", (code, signal) => {
-        clearTimeout(timer);
-        clearTimeout(killTimer);
-        if (timedOut) reject(new Error("Native QML timeout\n" + output));
-        else resolve({ code, signal });
-      });
-    });
-    assert.equal(result.code, 0, output);
-    assert.match(output, new RegExp(`WEATHER_E2E_PASS ${scenario} \\d+ assertions`), output);
+      assert.equal(result.code, 0, output);
+      assert.match(output, new RegExp(`WEATHER_E2E_PASS ${phase} \\d+ assertions`), output);
+      if (phase === "cache-offline")
+        assert.equal(fs.readFileSync(cachePath, "utf8"), savedCache, "Timeouts must not overwrite the disk cache");
+      if (phase === "cache-mismatch" || phase === "cache-corrupt") {
+        const saved = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+        assert.equal(saved.locationQuery, "44,-79");
+        assert.equal(saved.report.data.fixture, phase);
+        assert.equal(saved.dailyForecast.data.fixture, phase);
+      }
+    }
     assert.doesNotMatch(output, /^\s*ERROR\b/m, output);
     assert.doesNotMatch(output, /WEATHER_E2E_FAIL|ReferenceError|TypeError|Unable to assign|Cannot assign|Binding loop/i, output);
     assert.ok(requests.some(request => request.kind === "forecast"));
     assert.ok(requests.some(request => request.kind === "daily"));
-    console.log(output.match(/WEATHER_E2E_PASS[^\n]+/)[0]);
+    for (const passed of output.match(/WEATHER_E2E_PASS[^\n]+/g)) console.log(passed);
     const saveFile = path.join(work, "saves.jsonl");
     const saves = fs.existsSync(saveFile) ? fs.readFileSync(saveFile, "utf8").trim().split("\n").map(JSON.parse) : [];
     const stateFile = path.join(work, "home/.local/state/omarchy/settings/weather.json");
@@ -310,4 +338,28 @@ test("native QML rejects schema-invalid wttr JSON without replacing last-good cu
     assert.deepEqual(requests.filter(request => request.tag === mode && request.kind === "forecast").map(request => request.mode), [mode, "good"]);
   assert.equal((output.match(/No current conditions in weather response/g) || []).length, 3);
   assert.deepEqual(saves, []);
+});
+
+test("native QML restores disk cache across real offline restarts and rejects mismatched or corrupt caches", async () => {
+  const { requests, output } = await runScenario("cache");
+  assert.match(output, /Weather cache load failed/);
+  assert.match(output, /Request failed with exit code 28/);
+  for (const kind of ["forecast", "daily"])
+    assert.ok(requests.some(request => request.kind === kind && request.tag === "cache-offline" && request.cancelled));
+});
+
+test("native QML cache write errors are logged without discarding live weather", async () => {
+  const { output } = await runScenario("cache-write-error");
+  assert.match(output, /Weather cache write failed/);
+});
+
+test("native QML hard timeouts terminate all four hung requests while the UI keeps running", async () => {
+  const { requests, output } = await runScenario("timeouts");
+  for (const kind of ["forecast", "daily", "geocode", "location"]) {
+    const request = requests.find(request => request.tag === "timeouts" && request.kind === kind);
+    assert.ok(request && request.cancelled, `${kind} must time out and close its connection`);
+    assert.ok(request.elapsedMs >= timeouts[kind] * 1000 - 500, `${kind} ended before its timeout`);
+    assert.ok(request.elapsedMs <= timeouts[kind] * 1000 + 3000, `${kind} exceeded its hard timeout: ${request.elapsedMs}ms`);
+  }
+  assert.ok((output.match(/Request failed with exit code 28/g) || []).length >= 4);
 });

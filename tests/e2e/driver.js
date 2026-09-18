@@ -12,6 +12,7 @@ function fail(harness, message) {
 }
 
 function tick(harness) {
+    harness.ticks++
     if (harness.finished || !harness.steps.length) return
     var step = harness.steps[harness.stepIndex]
     if (!harness.stepStarted) harness.stepStarted = Date.now()
@@ -120,7 +121,7 @@ function startup() {
     })
     action("assert startup render tree", function() {
         h.panel.controller.show()
-        check(h.panel.reportTempNum === (["auto", "lookups", "schema"].indexOf(h.scenario) >= 0 ? "21" : "23"), "correct current-condition source")
+        check(h.panel.reportTempNum === (["auto", "lookups", "schema", "timeouts"].indexOf(h.scenario) >= 0 ? "21" : "23"), "correct current-condition source")
         check(h.panel.forecastDays.length === 3, "three future forecast days")
         check(h.panel.hourlyEntries.filter(function(entry) { return entry.kind === "hour" }).length === 48, "48 hourly samples")
         check(h.panel.hourlyEntries.some(function(entry) { return entry.kind === "sunrise" }), "sunrise in hourly strip")
@@ -381,6 +382,10 @@ function schemaScenario() {
 
 function start(harness) {
     h = harness
+    if (h.scenario.indexOf("cache-") === 0 && h.scenario !== "cache-write-error") {
+        cacheRestartScenario()
+        return
+    }
     startup()
     if (h.scenario === "auto") {
         until("IP auto-location label", function() { return h.panel.wttrLocation === "Auto City" })
@@ -395,4 +400,81 @@ function start(harness) {
     else if (h.scenario === "lookups") lookupsScenario()
     else if (h.scenario === "memory") memoryScenario()
     else if (h.scenario === "schema") schemaScenario()
+    else if (h.scenario === "timeouts") timeoutsScenario()
+    else if (h.scenario === "cache" || h.scenario === "cache-write-error") {
+        until("native cache writes settle", function() {
+            return networkIdle() && !h.panel.cacheWriteInFlight && !h.panel.cacheWritePending
+        })
+        action("live weather survives cache writes", function() {
+            check(h.panel.reportTempNum === "23" && h.panel.hourlyEntries.length >= 48, "current and hourly weather remain visible")
+        })
+    }
+}
+
+function cacheRestartScenario() {
+    action("load panel in a fresh shell process", function() { h.loadPanel() })
+    until("local startup reads complete before network responses", function() {
+        return h.panel && h.panel.weatherReady
+    }, 2000)
+    if (h.scenario === "cache-offline") {
+        var updatedAt
+        action("disk cache renders while providers are hanging", function() {
+            check(!networkIdle(), "refresh is still in flight")
+            check(h.panel.reportTempNum === "23" && h.panel.label !== "", "current temperature and icon restored")
+            check(h.panel.reportLocation === "Initial City", "configured location restored")
+            check(h.panel.hourlyEntries.length >= 48 && h.panel.forecastDays.length === 3, "hourly and daily forecasts restored")
+            updatedAt = h.panel.weatherCache.dailyForecast.updatedAt
+            check(h.panel.hourlyUpdatedAt === updatedAt, "cached timestamp is not replaced with startup time")
+        })
+        until("both hung providers time out", function() {
+            return h.panel.forecastRetries > 0 && h.panel.dailyForecastRetries > 0
+        }, 13000)
+        action("offline failure retains restored data and warns", function() {
+            check(h.panel.reportTempNum === "23" && h.panel.hourlyEntries.length >= 48, "cached forecast remains usable offline")
+            check(h.panel.hourlyUpdatedAt === updatedAt, "timeout does not freshen cached data")
+            check(h.panel.hourlyStatus.indexOf("Update failed") === 0, "offline warning is visible")
+        })
+    } else {
+        action("wrong-location or corrupt data is not restored", function() {
+            check(h.panel.locationQuery === "44,-79", "current saved location wins")
+            check(h.panel.report === null && h.panel.dailyForecastReport === null, "no invalid cached reports applied")
+            check(h.panel.reportTempNum === "" && h.panel.hourlyEntries.length === 0, "no wrong-location weather rendered")
+        })
+        until("live responses recover and repair cache", function() {
+            return h.panel.report && h.panel.dailyForecastReport
+                && !h.panel.cacheWritePending && !h.panel.cacheWriteInFlight && networkIdle()
+        })
+        action("new cache contains only matching responses", function() {
+            check(h.panel.weatherCache.locationQuery === "44,-79", "new cache belongs to saved location")
+            check(h.panel.weatherCache.report.data.fixture === h.scenario, "wttr payload replaced")
+            check(h.panel.weatherCache.dailyForecast.data.fixture === h.scenario, "daily payload replaced")
+        })
+    }
+}
+
+function timeoutsScenario() {
+    var ticks
+    var oldReport
+    var oldDaily
+    until("auto label and startup requests settle", function() { return h.panel.wttrLocation === "Auto City" && networkIdle() })
+    control({ tag: "timeouts", fallback: { mode: "good", delay: 20000 } })
+    action("start hung weather requests", function() {
+        ticks = h.ticks
+        oldReport = h.panel.report
+        oldDaily = h.panel.dailyForecastReport
+        h.panel.refresh()
+    })
+    edit("Timeout City")
+    until("hung geocode query starts", function() { return h.panel.geocodeActiveQuery === "Timeout City" })
+    until("all request timeout handlers run", function() {
+        return h.panel.forecastRetries > 0 && h.panel.dailyForecastRetries > 0 && h.panel.locationError !== ""
+    }, 13000)
+    action("event loop and editor remain responsive during timeouts", function() {
+        check(h.ticks - ticks > 100, "QML event loop continued ticking during hung requests")
+        check(h.panel.report === oldReport && h.panel.dailyForecastReport === oldDaily, "timeouts preserve last-good weather")
+        check(h.panel.wttrLocation === "Auto City", "location timeout preserves existing label")
+        check(h.panel.locationSuggestions.length === 0, "search timeout supplies no suggestions")
+        h.panel.cancelEditingLocation()
+        check(!h.panel.editingLocation, "editor still responds")
+    })
 }
