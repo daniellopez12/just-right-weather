@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
@@ -58,7 +58,7 @@ function prepare(work, scenario, address) {
     fs.mkdirSync(path.join(work, directory), { recursive: true, mode: 0o700 });
   for (const entry of ["Commons", "Ui", "driver.js", "shell.qml"])
     fs.cpSync(path.join(fixtures, entry), path.join(work, entry), { recursive: true });
-  for (const file of ["Panel.qml", "HourlyForecast.qml", "Model.js", "Network.js"]) {
+  for (const file of ["Panel.qml", "HourlyForecast.qml", "Model.js", "Network.js", "Cache.py"]) {
     fs.copyFileSync(path.join(root, file), path.join(work, "production", file));
     assert.deepEqual(fs.readFileSync(path.join(work, "production", file)), fs.readFileSync(path.join(root, file)));
   }
@@ -68,6 +68,7 @@ function prepare(work, scenario, address) {
     fs.writeFileSync(path.join(settings, "weather.json"), JSON.stringify({ name: "Initial City", latitude: 40, longitude: -75 }));
 
   // A whitelist-only PATH means the real location helper can never execute.
+  fs.symlinkSync("/usr/bin/python3", path.join(work, "bin", "python3"));
   fs.writeFileSync(path.join(work, "bin", "curl"), `#!/usr/bin/python3
 import os
 import sys
@@ -213,12 +214,50 @@ async function runScenario(scenario) {
     const cachePath = path.join(work, "cache/just-right-weather/forecast.json");
     if (scenario === "cache-write-error")
       fs.writeFileSync(path.dirname(cachePath), "A file blocks cache directory creation");
+    if (scenario === "helper-timeout") {
+      plan = { fallback: { mode: "good", delay: 800 } };
+      fs.unlinkSync(path.join(work, "bin", "python3"));
+      executable(path.join(work, "bin", "python3"), `
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(path.join(work, "helpers.jsonl"))},
+  JSON.stringify({ pid: process.pid, operation: process.argv[4] }) + "\\n");
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`);
+    }
     const phases = scenario === "cache" ? ["cache", "cache-offline", "cache-expired", "cache-report-expired", "cache-mismatch", "cache-corrupt"]
+      : scenario === "unsafe-cache" ? ["unsafe-cache-symlink", "unsafe-cache-fifo", "unsafe-cache-oversize", "unsafe-cache-directory"]
       : scenario === "auto-cache" ? ["auto-cache", "auto-cache-moved", "auto-cache-interrupted", "auto-cache-retry"] : [scenario];
     let savedCache;
     for (const phase of phases) {
       let expectedCache;
-      if (phase.startsWith("auto-cache-")) {
+      let unrelatedPath;
+      let unrelatedContents;
+      if (phase.startsWith("unsafe-cache-")) {
+        fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+        if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath);
+        unrelatedPath = path.join(work, "unrelated.json");
+        unrelatedContents = JSON.stringify({
+          version: 1, locationQuery: "40,-75",
+          report: { data: payload("forecast", new URL("https://wttr.in/")), updatedAt: Date.now() },
+          dailyForecast: null,
+        });
+        fs.writeFileSync(unrelatedPath, unrelatedContents);
+        if (phase === "unsafe-cache-symlink") fs.symlinkSync(unrelatedPath, cachePath);
+        else if (phase === "unsafe-cache-fifo") assert.equal(spawnSync("mkfifo", [cachePath]).status, 0);
+        else if (phase === "unsafe-cache-oversize") {
+          fs.writeFileSync(cachePath, "");
+          fs.truncateSync(cachePath, 1024 * 1024 * 1024);
+        } else {
+          const unrelatedDirectory = path.join(work, "unrelated-directory");
+          fs.mkdirSync(unrelatedDirectory);
+          unrelatedPath = path.join(unrelatedDirectory, "forecast.json");
+          fs.writeFileSync(unrelatedPath, unrelatedContents);
+          fs.rmdirSync(path.dirname(cachePath));
+          fs.symlinkSync(unrelatedDirectory, path.dirname(cachePath));
+        }
+        plan = { tag: phase, fallback: { mode: "good", delay: 800 } };
+      } else if (phase.startsWith("auto-cache-")) {
         fs.writeFileSync(cachePath, savedCache);
         plan = {
           tag: phase,
@@ -274,6 +313,15 @@ async function runScenario(scenario) {
       });
       assert.equal(result.code, 0, output);
       assert.match(output, new RegExp(`WEATHER_E2E_PASS ${phase} \\d+ assertions`), output);
+      if (phase.startsWith("unsafe-cache-")) {
+        assert.equal(fs.readFileSync(unrelatedPath, "utf8"), unrelatedContents, "Unrelated file must not change");
+        if (phase !== "unsafe-cache-directory") {
+          assert.ok(fs.lstatSync(cachePath).isFile(), "Live weather safely replaces rejected cache entries");
+          const saved = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+          assert.equal(saved.report.data.fixture, phase);
+          assert.equal(saved.dailyForecast.data.fixture, phase);
+        }
+      }
       if (phase === "auto-cache") {
         savedCache = fs.readFileSync(cachePath, "utf8");
         const saved = JSON.parse(savedCache);
@@ -307,6 +355,13 @@ async function runScenario(scenario) {
     }
     assert.doesNotMatch(output, /^\s*ERROR\b/m, output);
     assert.doesNotMatch(output, /WEATHER_E2E_FAIL|ReferenceError|TypeError|Unable to assign|Cannot assign|Binding loop/i, output);
+    if (scenario === "helper-timeout") {
+      const helpers = fs.readFileSync(path.join(work, "helpers.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+      assert.ok(helpers.some(helper => helper.operation === "read"));
+      assert.ok(helpers.some(helper => helper.operation === "write"));
+      for (const helper of helpers)
+        assert.throws(() => process.kill(helper.pid, 0), { code: "ESRCH" }, "Timed-out helper must no longer exist");
+    }
     assert.ok(requests.some(request => request.kind === "forecast"));
     assert.ok(requests.some(request => request.kind === "daily"));
     for (const passed of output.match(/WEATHER_E2E_PASS[^\n]+/g)) console.log(passed);
@@ -424,6 +479,18 @@ test("native QML auto-mode restart waits for live coordinates and keeps moved-ne
 test("native QML cache write errors are logged without discarding live weather", async () => {
   const { output } = await runScenario("cache-write-error");
   assert.match(output, /Weather cache write failed/);
+});
+
+test("native QML rejects symlink, FIFO, oversized and redirected caches without blocking startup", async () => {
+  const { output } = await runScenario("unsafe-cache");
+  assert.equal((output.match(/Weather cache load failed/g) || []).length, 4);
+  assert.match(output, /Weather cache write failed/, "Redirected cache directory cannot be written");
+});
+
+test("native QML cache watchdogs kill stalled readers and writers while live weather recovers", async () => {
+  const { output } = await runScenario("helper-timeout");
+  assert.match(output, /Weather cache load failed: helper did not finish within 5 seconds/);
+  assert.match(output, /Weather cache write failed: helper did not finish within 5 seconds/);
 });
 
 test("native QML repeated auto refreshes reject obsolete coordinates in either response order", async () => {

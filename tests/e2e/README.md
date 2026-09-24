@@ -14,7 +14,7 @@ fail explicitly rather than silently skipping native coverage.
 ## What runs
 
 The runner starts the actual Quickshell executable with an offscreen Qt Quick
-window. `Panel.qml`, `HourlyForecast.qml`, `Model.js`, and `Network.js` are copied
+window. `Panel.qml`, `HourlyForecast.qml`, `Model.js`, `Network.js`, and `Cache.py` are copied
 **byte-for-byte** from the current working tree and verified against the originals.
 The complete production component, render tree, `Process`, `StdioCollector`,
 `FileView`, loaders, bindings, and timers run natively. There are no extracted
@@ -58,6 +58,13 @@ Covered scenarios:
   cache bytes and timestamps after timeouts, rejection of a different saved
   location and a corrupt file, and replacement with valid matching responses.
   Cache directory/write failures are logged without breaking live weather.
+  Symlinks to unrelated valid weather JSON, writerless FIFOs, sparse 1 GiB
+  files, and symlinked cache directories are rejected before restoration while
+  the editor and native heartbeat remain responsive. Live weather repairs
+  rejected file entries without altering unrelated targets; redirected cache
+  directories remain unwritten.
+  Stalled read/write helpers are killed by the production five-second watchdogs;
+  startup recovers, queued writes settle and live weather remains visible.
   Week-old caches, including current-conditions-only caches, retain a visible
   age warning even after every hourly entry has expired and refreshes fail.
 - Auto-mode restarts on a different network, with delayed wttr/Open-Meteo
@@ -106,6 +113,9 @@ curlrc/proxies and external network configuration are not imported. The Linux
 `/proc/self/cwd/runtime` alias points to that same private runtime directory,
 keeping Quickshell's isolated IPC socket below the Unix socket path limit.
 
+The PATH includes the real Python 3 interpreter for the unmodified cache helper.
+Only the watchdog scenario substitutes an inert, hanging process for that
+interpreter, and verifies that every spawned helper has been terminated.
 The PATH's curl wrapper whitelists production weather hosts, rewrites **only**
 the URL to a loopback server, then `exec`s real curl with the original flags,
 timeouts and response-size limits. The server verifies every endpoint budget.

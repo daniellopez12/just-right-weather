@@ -390,6 +390,14 @@ function start(harness) {
         expiredCacheScenario()
         return
     }
+    if (h.scenario === "helper-timeout") {
+        helperTimeoutScenario()
+        return
+    }
+    if (h.scenario.indexOf("unsafe-cache-") === 0) {
+        unsafeCacheScenario()
+        return
+    }
     if (h.scenario.indexOf("cache-") === 0 && h.scenario !== "cache-write-error") {
         cacheRestartScenario()
         return
@@ -418,6 +426,62 @@ function start(harness) {
             check(h.panel.reportTempNum === (h.scenario === "auto-cache" ? "21" : "23") && h.panel.hourlyEntries.length >= 48, "current and hourly weather remain visible")
         })
     }
+}
+
+function helperTimeoutScenario() {
+    var ticks
+    var started
+    action("start with a stalled cache helper", function() {
+        ticks = h.ticks
+        started = Date.now()
+        h.loadPanel()
+    })
+    until("read watchdog unblocks weather initialization", function() {
+        return h.panel && h.panel.weatherReady
+    }, 6500)
+    action("read timeout preserves responsive UI and no cached data", function() {
+        check(Date.now() - started >= 4800, "production read watchdog duration is unchanged")
+        check(h.ticks - ticks > 100, "QML heartbeat continues during hung cache read")
+        check(h.panel.weatherCache === null, "hung helper supplies no cache")
+        h.panel.startEditingLocation()
+        check(h.panel.editingLocation, "editor remains responsive")
+        h.panel.cancelEditingLocation()
+    })
+    until("live weather succeeds despite stalled writes", function() {
+        return h.panel.report && h.panel.dailyForecastReport && h.panel.cacheWriteInFlight
+    })
+    until("write watchdog clears every pending write", function() {
+        return !h.panel.cacheWriteInFlight && !h.panel.cacheWritePending && networkIdle()
+    }, 12000)
+    action("write timeouts do not discard live weather", function() {
+        check(h.panel.reportTempNum === "23" && h.panel.hourlyEntries.length >= 48, "current and hourly weather survive")
+    })
+}
+
+function unsafeCacheScenario() {
+    var ticks
+    action("start with an unsafe cache entry", function() {
+        ticks = h.ticks
+        h.loadPanel()
+    })
+    until("unsafe cache is rejected before live responses", function() {
+        return h.panel && h.panel.weatherReady
+    }, 2000)
+    action("unsafe bytes never enter the weather model", function() {
+        check(h.panel.weatherCache === null, "cache remains unset")
+        check(h.panel.report === null && h.panel.dailyForecastReport === null, "unrelated data is not restored")
+        h.panel.startEditingLocation()
+        check(h.panel.editingLocation, "editor responds after rejecting cache")
+        h.panel.cancelEditingLocation()
+    })
+    until("live weather recovers and writes finish", function() {
+        return h.panel.report && h.panel.dailyForecastReport && networkIdle()
+            && !h.panel.cacheWritePending && !h.panel.cacheWriteInFlight
+    })
+    action("unsafe cache does not disable weather or the UI", function() {
+        check(h.panel.reportTempNum === "23" && h.panel.hourlyEntries.length >= 48, "live current and hourly conditions render")
+        check(h.ticks - ticks > 10, "native QML heartbeat continues")
+    })
 }
 
 function expiredCacheScenario() {

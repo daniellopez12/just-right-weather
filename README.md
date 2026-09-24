@@ -24,7 +24,7 @@ An Omarchy installation with the Quattro shell and `omarchy plugin` commands.
 This is a Quickshell plugin, not a Waybar module.
 
 The plugin uses the shell's `qs.Commons` and `qs.Ui` components, Qt Quick,
-Quickshell I/O, `curl` 8.4.0 or newer, and the existing Omarchy commands
+Quickshell I/O, Python 3 (standard library only), `curl` 8.4.0 or newer, and the existing Omarchy commands
 `omarchy-weather-location`, `omarchy-weather-status`, and
 `omarchy-notification-send`. The location command also uses `jq`. These are
 provided by a normal compatible Omarchy installation.
@@ -137,10 +137,21 @@ The last successful provider payloads, their fetch timestamps, and a location
 query are stored locally in `$XDG_CACHE_HOME/just-right-weather/forecast.json`
 (default `~/.cache/just-right-weather/forecast.json`). This file includes location
 information returned by the providers; it is not uploaded or bundled with the
-plugin. Reads and atomic writes are asynchronous. Failed requests never replace
-the cache; corrupt or incompatible caches are logged and ignored, and cache
-write errors are logged without discarding live weather. You may delete this
-file to clear the saved forecast.
+plugin. Reads and atomic writes run asynchronously in a bundled Python helper.
+The helper opens the cache directory and file without following symlinks,
+opens reads nonblocking, and checks that the opened file is regular before
+reading. Both reads and write input are capped at 512 KiB **before** cache data
+reaches the shell's output collector or disk. Reads remain bounded if a file
+grows during the operation. Private temporary files are atomically renamed
+within the same held directory; writes never open an existing cache target.
+Each helper operation has a five-second watchdog, so failures cannot prevent
+live weather initialization indefinitely.
+
+Failed requests never replace the cache; unsafe, corrupt or incompatible caches
+are logged and ignored, and cache write errors are logged without discarding
+live weather. A successful refresh may safely replace a rejected cache symlink
+or FIFO, without opening its target. A symlinked cache directory is rejected for
+both reading and writing. You may delete the cache file to clear the saved forecast.
 
 | Service | When contacted | Information sent |
 | --- | --- | --- |
@@ -186,6 +197,17 @@ omarchy plugin enable omarchy.weather --section center
 
 ## Release notes
 
+### 1.0.4 - Safe, bounded cache I/O
+
+Replaces the forecast cache's `FileView` with descriptor-based I/O that rejects
+symlinks, FIFOs, directories and oversized files before collecting any content.
+The 512 KiB limit is enforced by the producer, not just after a file has already
+been loaded into the shell. Atomic writes use private temporary files and a
+held directory descriptor, with bounded input and no opening of existing targets.
+Offline restoration, original timestamps and last-good weather behavior are
+preserved. Native regressions exercise hostile cache entries without touching
+an installed plugin, and helper tests cover exact size limits and file/path races.
+
 ### 1.0.3 - Persistent weather cache
 
 Successful weather responses are saved with asynchronous, atomic disk writes
@@ -230,7 +252,8 @@ node --test tests/*.test.cjs
 
 On Arch, `qmllint` may be at `/usr/lib/qt6/bin/qmllint` instead of on `PATH`.
 The optional device-location file requires the Qt Positioning import to lint.
-The tests use Node's built-in test runner, with no package installation. Network
+The tests use Node's built-in test runner, with no package installation. Cache
+I/O tests also use Python 3 and `mkfifo` against private synthetic files. Network
 regressions use curl against a loopback HTTP server and synthetic responses;
 they do not contact weather providers.
 

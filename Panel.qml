@@ -98,6 +98,7 @@ Panel {
   property bool cacheWriteInFlight: false
   readonly property string weatherCachePath: (Quickshell.env("XDG_CACHE_HOME")
     || Quickshell.env("HOME") + "/.cache") + "/just-right-weather/forecast.json"
+  readonly property string cacheHelperPath: decodeURIComponent(Qt.resolvedUrl("Cache.py").toString().replace(/^file:\/\//, ""))
 
   function initializeWeather() {
     if (weatherReady || !locationReady || !cacheReady) return
@@ -128,48 +129,75 @@ Panel {
     if (cacheWriteInFlight || !cacheWritePending) return
     cacheWritePending = false
     try {
-      var text = Network.responseText(JSON.stringify(weatherCache), 0, 0, 512 * 1024)
-      // FileView does not emit saved for identical content.
-      if (text === weatherCacheFile.text()) return
+      cacheWriteProc.input = Network.responseText(JSON.stringify(weatherCache), 0, 0, 512 * 1024)
       cacheWriteInFlight = true
-      weatherCacheFile.setText(text)
+      cacheWriteProc.stdinEnabled = true
+      cacheWriteProc.running = true
     } catch (e) {
       cacheWriteInFlight = false
       console.warn("Weather cache write failed: " + e)
     }
   }
 
-  FileView {
-    id: weatherCacheFile
-    path: root.weatherCachePath
-    blockLoading: false
-    blockWrites: false
-    atomicWrites: true
-    printErrors: false
-    onLoaded: {
+  Process {
+    id: cacheReadProc
+    command: ["python3", "-I", root.cacheHelperPath, "read", root.weatherCachePath]
+    running: true
+    stdout: StdioCollector {
+      id: cacheReadOutput
+      waitForEnd: true
+    }
+    onExited: function(exitCode, exitStatus) {
       if (root.cacheReady) return
       try {
-        root.weatherCache = Model.parseWeatherCache(Network.responseText(text(), 0, 0, 512 * 1024))
+        // Exit 3 means no cache yet. Every other failure is reported.
+        if (exitCode !== 3 || exitStatus !== 0)
+          root.weatherCache = Model.parseWeatherCache(Network.responseText(cacheReadOutput.text, exitCode, exitStatus, 512 * 1024))
       } catch (e) {
         console.warn("Weather cache load failed: " + e)
       }
       root.cacheReady = true
       Qt.callLater(root.initializeWeather)
     }
-    onLoadFailed: function(error) {
-      if (error !== FileViewError.FileNotFound)
-        console.warn("Weather cache load failed: " + FileViewError.toString(error))
+  }
+
+  Timer {
+    interval: 5000
+    running: !root.cacheReady
+    onTriggered: {
+      console.warn("Weather cache load failed: helper did not finish within 5 seconds")
       root.cacheReady = true
+      if (cacheReadProc.running) cacheReadProc.signal(9)
       Qt.callLater(root.initializeWeather)
     }
-    onSaved: {
+  }
+
+  Process {
+    id: cacheWriteProc
+    property string input: ""
+    command: ["python3", "-I", root.cacheHelperPath, "write", root.weatherCachePath]
+    onStarted: {
+      write(input)
+      stdinEnabled = false
+    }
+    onExited: function(exitCode, exitStatus) {
       root.cacheWriteInFlight = false
+      if (exitCode !== 0 || exitStatus !== 0)
+        console.warn("Weather cache write failed: helper exited with code " + exitCode)
       if (root.cacheWritePending) Qt.callLater(root.writeWeatherCache)
     }
-    onSaveFailed: function(error) {
-      root.cacheWriteInFlight = false
-      console.warn("Weather cache write failed: " + FileViewError.toString(error))
-      if (root.cacheWritePending) Qt.callLater(root.writeWeatherCache)
+  }
+
+  Timer {
+    interval: 5000
+    running: root.cacheWriteInFlight
+    onTriggered: {
+      console.warn("Weather cache write failed: helper did not finish within 5 seconds")
+      if (cacheWriteProc.running) cacheWriteProc.signal(9)
+      else {
+        root.cacheWriteInFlight = false
+        if (root.cacheWritePending) Qt.callLater(root.writeWeatherCache)
+      }
     }
   }
 
