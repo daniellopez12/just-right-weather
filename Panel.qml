@@ -16,6 +16,7 @@ Panel {
   property bool openedFromHotkey: false
   readonly property color foreground: Color.popups.text
   readonly property string fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+  readonly property string pluginVersion: "1.0.6"
 
   // The bar tracks the widget mounted in its slot — BarWidget.qml — not this
   // nested panel. Everything the bar identifies a panel by has to be that
@@ -869,7 +870,7 @@ Panel {
     centerOnBar: true
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(600))
-    contentHeight: panel.fittedContentHeight(weatherColumn.implicitHeight)
+    contentHeight: panel.fittedContentHeight(weatherColumn.implicitHeight + versionLabel.implicitHeight + Style.space(6))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -879,9 +880,22 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
+      Text {
+        id: versionLabel
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        text: "v" + root.pluginVersion
+        textFormat: Text.PlainText
+        color: root.foreground
+        opacity: 0.55
+        font.family: root.fontFamily
+        font.pixelSize: Style.space(9)
+      }
+
       Flickable {
         id: weatherScroll
         anchors.fill: parent
+        anchors.bottomMargin: versionLabel.implicitHeight + Style.space(6)
         contentWidth: width
         contentHeight: weatherColumn.implicitHeight
         clip: true

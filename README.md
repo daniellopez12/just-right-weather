@@ -66,6 +66,8 @@ precision. Hourly dates and times refer to the forecast location.
 
 Middle-click the bar icon to refresh. Right-click shows the standard Omarchy
 weather notification. Press Tab / Shift+Tab to switch between bar panels.
+The popup's bottom-right corner shows the installed plugin version in small,
+muted text.
 
 Click the location label, or press Enter with the popup open, to choose a
 location. Search for a city or US ZIP, or paste `latitude, longitude`, then
@@ -211,6 +213,13 @@ omarchy plugin enable omarchy.weather --section center
 ```
 
 ## Release notes
+
+### 1.0.6 - Subtle version label
+
+Adds a small, muted installed-version label in the popup's bottom-right corner.
+The footer remains separate from scrollable weather content. A regression check
+keeps the displayed version synchronized with the manifest; the cache and
+saved-location safeguards from 1.0.4 and 1.0.5 are unchanged.
 
 ### 1.0.5 - Safe saved-location reads
 

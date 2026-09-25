@@ -142,6 +142,14 @@ function startup() {
         check(flicks[0].contentX > 0, "hourly navigation scrolls")
         strips[0].scrollBy(-1)
         check(flicks[0].contentX === 0, "hourly navigation returns to beginning")
+        var versions = descendants(h.panel, function(item) { return item.text === "v" + h.panel.pluginVersion })
+        check(versions.length === 1 && versions[0].visible, "one version label is visible")
+        var version = versions[0]
+        check(version.font.pixelSize === 9, "version label uses compact type")
+        check(Math.abs(version.x + version.width - version.parent.width) < 1, "version is right-aligned")
+        check(Math.abs(version.y + version.height - version.parent.height) < 1, "version is bottom-aligned")
+        var scrolls = descendants(h.panel, function(item) { return item.contentHeight !== undefined && item.contentWidth !== undefined && item.clip })
+        check(scrolls.some(function(item) { return item.y + item.height <= version.y && item.width === version.parent.width }), "weather content cannot overlap version footer")
     })
 }
 
