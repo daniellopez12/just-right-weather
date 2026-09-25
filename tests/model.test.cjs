@@ -4,12 +4,6 @@ const path = require("node:path");
 const test = require("node:test");
 const Model = require("../Model.js");
 
-test("displayed plugin version stays synchronized with the release manifest", () => {
-  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "../manifest.json"), "utf8"));
-  const panel = fs.readFileSync(path.join(__dirname, "../Panel.qml"), "utf8");
-  assert.equal(panel.match(/readonly property string pluginVersion: "([^"]+)"/)[1], manifest.version);
-});
-
 function forecast() {
   const start = Date.parse("2030-01-10T00:00:00Z");
   const time = Array.from({ length: 96 }, (_, i) =>

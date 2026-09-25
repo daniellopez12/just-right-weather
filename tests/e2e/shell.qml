@@ -8,6 +8,7 @@ ShellRoot {
     id: harness
     readonly property string server: Quickshell.env("WEATHER_E2E_SERVER")
     readonly property string scenario: Quickshell.env("WEATHER_E2E_SCENARIO")
+    readonly property string expectedVersion: Quickshell.env("WEATHER_E2E_VERSION")
     readonly property var panel: weather.item
     property var steps: []
     property int stepIndex: 0

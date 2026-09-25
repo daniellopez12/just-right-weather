@@ -16,6 +16,8 @@ fail explicitly rather than silently skipping native coverage.
 The runner starts the actual Quickshell executable with an offscreen Qt Quick
 window. `Panel.qml`, `HourlyForecast.qml`, `Model.js`, `Network.js`, and `Cache.py` are copied
 **byte-for-byte** from the current working tree and verified against the originals.
+The installed manifest is also copied; the dynamic-version scenario changes
+only its version to prove the label is not a QML constant.
 The complete production component, render tree, `Process`, `StdioCollector`,
 loaders, bindings, and timers run natively. There are no extracted
 handlers, injected production aliases/hooks, response-budget overrides, or
@@ -29,6 +31,10 @@ process activity without modifying production IDs.
 
 Covered scenarios:
 
+- Manifest-driven version labels: startup with a changed manifest, live updates
+  on normal/hotkey popup opens, rejection of malformed JSON and writerless FIFOs,
+  and recovery after repair. A hung version reader is killed after five seconds
+  while weather starts and the editor remains responsive.
 - Startup with configured coordinates and IP auto-location; current conditions,
   three future days, 48 hourly samples, solar events, icon/render bindings, and
   native hourly scrolling.

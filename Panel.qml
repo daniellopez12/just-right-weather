@@ -16,7 +16,45 @@ Panel {
   property bool openedFromHotkey: false
   readonly property color foreground: Color.popups.text
   readonly property string fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-  readonly property string pluginVersion: "1.0.6"
+  property string pluginVersion: ""
+  property bool versionReadInFlight: false
+
+  function reloadPluginVersion() {
+    if (versionReadInFlight || versionReadProc.running) return
+    versionReadInFlight = true
+    versionReadDeadline.restart()
+    versionReadProc.running = true
+  }
+
+  Process {
+    id: versionReadProc
+    command: ["python3", "-I", root.cacheHelperPath, "read-version",
+      decodeURIComponent(Qt.resolvedUrl("manifest.json").toString().replace(/^file:\/\//, ""))]
+    stdout: StdioCollector {
+      id: versionReadOutput
+      waitForEnd: true
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (!root.versionReadInFlight) return
+      root.versionReadInFlight = false
+      versionReadDeadline.stop()
+      try {
+        root.pluginVersion = Network.responseText(versionReadOutput.text, exitCode, exitStatus, 256)
+      } catch (e) {
+        console.warn("Weather version load failed: " + e)
+      }
+    }
+  }
+
+  Timer {
+    id: versionReadDeadline
+    interval: 5000
+    onTriggered: {
+      root.versionReadInFlight = false
+      console.warn("Weather version load failed: helper did not finish within 5 seconds")
+      if (versionReadProc.running) versionReadProc.signal(9)
+    }
+  }
 
   // The bar tracks the widget mounted in its slot — BarWidget.qml — not this
   // nested panel. Everything the bar identifies a panel by has to be that
@@ -30,6 +68,7 @@ Panel {
     openedFromHotkey = false
     setCenterHoverRevealSuppressed(false)
     root.controller.show()
+    reloadPluginVersion()
     reloadConfiguredLocation()
     root.refresh()
   }
@@ -37,6 +76,7 @@ Panel {
   function openFromHotkey() {
     openedFromHotkey = true
     root.controller.show()
+    reloadPluginVersion()
     reloadConfiguredLocation()
     root.refresh()
     // Set after showing, not before: showing hands the popout coordinator
@@ -307,7 +347,10 @@ Panel {
     Qt.callLater(initializeWeather)
   }
 
-  Component.onCompleted: reloadConfiguredLocation()
+  Component.onCompleted: {
+    reloadConfiguredLocation()
+    reloadPluginVersion()
+  }
 
   // Only one read may run at a time. Opening or saving also requests a read;
   // its generation prevents an older in-flight result from undoing a save.
@@ -884,7 +927,8 @@ Panel {
         id: versionLabel
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        text: "v" + root.pluginVersion
+        text: root.pluginVersion ? "v" + root.pluginVersion : ""
+        visible: root.pluginVersion !== ""
         textFormat: Text.PlainText
         color: root.foreground
         opacity: 0.55

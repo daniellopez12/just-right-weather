@@ -1,5 +1,6 @@
 """Bounded weather file I/O; stdout contains only accepted data."""
 
+import json
 import os
 import secrets
 import stat
@@ -7,6 +8,7 @@ import sys
 
 MAX_BYTES = 512 * 1024
 LOCATION_MAX_BYTES = 16 * 1024
+MANIFEST_MAX_BYTES = 16 * 1024
 MISSING = 3
 
 
@@ -42,12 +44,24 @@ def write_cache(directory, name, data):
             pass
 
 
+def manifest_version(data):
+    manifest = json.loads(data)
+    if not isinstance(manifest, dict) or manifest.get("id") != "io.github.daniellopez12.just-right-weather":
+        raise ValueError("Unexpected plugin manifest")
+    version = manifest.get("version")
+    if not isinstance(version, str) or not 1 <= len(version) <= 64 or version != version.strip() or not version.isprintable():
+        raise ValueError("Invalid plugin version")
+    return version.encode("utf-8")
+
+
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in ("read", "read-location", "write"):
-        print("Usage: Cache.py read|read-location|write PATH", file=sys.stderr)
+    if len(sys.argv) != 3 or sys.argv[1] not in ("read", "read-location", "read-version", "write"):
+        print("Usage: Cache.py read|read-location|read-version|write PATH", file=sys.stderr)
         return 1
     operation, path = sys.argv[1:]
     description = "Weather location read" if operation == "read-location" else "Weather cache " + operation
+    if operation == "read-version":
+        description = "Weather version read"
     try:
         if operation == "write":
             data = sys.stdin.buffer.read(MAX_BYTES + 1)
@@ -59,8 +73,10 @@ def main():
         directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             if operation != "write":
-                max_bytes = LOCATION_MAX_BYTES if operation == "read-location" else MAX_BYTES
-                sys.stdout.buffer.write(read_cache(directory, name, max_bytes))
+                max_bytes = (MANIFEST_MAX_BYTES if operation == "read-version"
+                             else LOCATION_MAX_BYTES if operation == "read-location" else MAX_BYTES)
+                data = read_cache(directory, name, max_bytes)
+                sys.stdout.buffer.write(manifest_version(data) if operation == "read-version" else data)
             else:
                 write_cache(directory, name, data)
         finally:
@@ -70,7 +86,7 @@ def main():
             return MISSING
         print("Weather cache write failed: " + str(error), file=sys.stderr)
         return 1
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         print(description + " failed: " + str(error), file=sys.stderr)
         return 1
     return 0

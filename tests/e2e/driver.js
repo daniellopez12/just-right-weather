@@ -118,6 +118,7 @@ function startup() {
     action("load byte-identical production component", function() { h.loadPanel() })
     until("current, daily and hourly startup responses", function() {
         return h.panel && h.panel.report && h.panel.dailyForecastReport && h.panel.hourlyEntries.length >= 48
+            && h.panel.pluginVersion === h.expectedVersion
     })
     action("assert startup render tree", function() {
         h.panel.controller.show()
@@ -389,6 +390,10 @@ function schemaScenario() {
 
 function start(harness) {
     h = harness
+    if (h.scenario === "version-timeout") {
+        versionTimeoutScenario()
+        return
+    }
     if (h.scenario.indexOf("unsafe-location-") === 0) {
         unsafeLocationScenario()
         return
@@ -434,6 +439,7 @@ function start(harness) {
     else if (h.scenario === "timeouts") timeoutsScenario()
     else if (h.scenario === "location-reloads") locationReloadsScenario()
     else if (h.scenario === "location-race") locationRaceScenario()
+    else if (h.scenario === "dynamic-version") dynamicVersionScenario()
     else if (h.scenario === "auto-refresh" || h.scenario === "auto-refresh-interrupted") autoRefreshScenario()
     else if (h.scenario === "cache" || h.scenario === "cache-write-error" || h.scenario === "auto-cache") {
         until("native cache writes settle", function() {
@@ -443,6 +449,59 @@ function start(harness) {
             check(h.panel.reportTempNum === (h.scenario === "auto-cache" ? "21" : "23") && h.panel.hourlyEntries.length >= 48, "current and hourly weather remain visible")
         })
     }
+}
+
+function dynamicVersionScenario() {
+    action("only fixture manifest determines startup version", function() {
+        check(h.panel.pluginVersion === "8.7.6", "unchanged production QML displays altered manifest version")
+    })
+    control({ inspect: true, manifest: { version: "9.8.7-beta.1" } })
+    action("reopen after manifest-only update", function() { h.panel.open() })
+    until("label changes without restarting QML", function() { return h.panel.pluginVersion === "9.8.7-beta.1" })
+    action("rendered version follows manifest", function() {
+        var labels = descendants(h.panel, function(item) { return item.text === "v9.8.7-beta.1" })
+        check(labels.length === 1 && labels[0].visible, "new version visibly rendered")
+    })
+    var invalidModes = ["malformed", "fifo"]
+    invalidModes.forEach(function(mode) {
+        control({ inspect: true, manifest: { mode: mode } })
+        action("reopen with rejected manifest", function() { h.panel.openFromHotkey() })
+        until("bad manifest read finishes without blocking", function() { return !h.panel.versionReadInFlight })
+        action("last known version and weather survive", function() {
+            check(h.panel.pluginVersion === "9.8.7-beta.1", "invalid file cannot supply a fake version")
+            check(h.panel.hourlyEntries.length >= 48, "weather unaffected")
+        })
+    })
+    control({ inspect: true, manifest: { version: "10.0.0" } })
+    action("reopen after manifest repair", function() { h.panel.open() })
+    until("repaired manifest updates version", function() { return h.panel.pluginVersion === "10.0.0" })
+}
+
+function versionTimeoutScenario() {
+    var ticks
+    var started
+    action("load panel with stalled version reader", function() {
+        ticks = h.ticks
+        started = Date.now()
+        h.loadPanel()
+    })
+    until("weather starts independently of version metadata", function() {
+        return h.panel && h.panel.weatherReady && h.panel.hourlyEntries.length >= 48
+    }, 2000)
+    action("missing version is not fabricated", function() {
+        check(h.panel.pluginVersion === "" && h.panel.versionReadInFlight, "no hardcoded fallback")
+        h.panel.startEditingLocation()
+        check(h.panel.editingLocation, "editor remains responsive")
+        h.panel.cancelEditingLocation()
+    })
+    until("version watchdog ends the stalled read", function() { return !h.panel.versionReadInFlight }, 6500)
+    action("deadline enforced without blocking UI", function() {
+        check(Date.now() - started >= 4800 && Date.now() - started < 6200, "five-second limit")
+        check(h.ticks - ticks > 100, "heartbeat continued")
+    })
+    control({ inspect: true, versionHelper: "normal" })
+    action("reopen after helper recovers", function() { h.panel.open() })
+    until("actual release version appears", function() { return h.panel.pluginVersion === h.expectedVersion })
 }
 
 function unsafeLocationScenario() {

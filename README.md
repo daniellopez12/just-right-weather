@@ -67,7 +67,10 @@ precision. Hourly dates and times refer to the forecast location.
 Middle-click the bar icon to refresh. Right-click shows the standard Omarchy
 weather notification. Press Tab / Shift+Tab to switch between bar panels.
 The popup's bottom-right corner shows the installed plugin version in small,
-muted text.
+muted text. It reads `manifest.json` at startup and whenever the popup opens;
+changing the release version in the manifest updates the label automatically,
+without a second version value in QML. A failed read is logged and retains the
+last known version, or hides the label if no version has loaded yet.
 
 Click the location label, or press Enter with the popup open, to choose a
 location. Search for a city or US ZIP, or paste `latitude, longitude`, then
@@ -164,6 +167,11 @@ within the same held directory; writes never open an existing cache target.
 Each helper operation has a five-second watchdog, so failures cannot prevent
 live weather initialization indefinitely.
 
+The installed `manifest.json` is read with the same no-follow, regular-file
+checks, a 16 KiB input cap and a five-second watchdog. Only a validated version
+string (at most 64 characters) is emitted to the shell. Version reads never
+block weather initialization and do not fetch version information from GitHub.
+
 Failed requests never replace the cache; unsafe, corrupt or incompatible caches
 are logged and ignored, and cache write errors are logged without discarding
 live weather. A successful refresh may safely replace a rejected cache symlink
@@ -213,6 +221,13 @@ omarchy plugin enable omarchy.weather --section center
 ```
 
 ## Release notes
+
+### 1.0.7 - Manifest-driven version label
+
+The version label now reads the installed manifest rather than a separate QML
+constant. It refreshes at startup and on popup opens using protected, bounded
+file I/O. Native regressions change only the manifest and verify that the
+rendered label follows automatically, including after a failed read or timeout.
 
 ### 1.0.6 - Subtle version label
 

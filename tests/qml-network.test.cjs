@@ -58,9 +58,15 @@ function prepare(work, scenario, address) {
     fs.mkdirSync(path.join(work, directory), { recursive: true, mode: 0o700 });
   for (const entry of ["Commons", "Ui", "driver.js", "shell.qml"])
     fs.cpSync(path.join(fixtures, entry), path.join(work, entry), { recursive: true });
-  for (const file of ["Panel.qml", "HourlyForecast.qml", "Model.js", "Network.js", "Cache.py"]) {
+  for (const file of ["Panel.qml", "HourlyForecast.qml", "Model.js", "Network.js", "Cache.py", "manifest.json"]) {
     fs.copyFileSync(path.join(root, file), path.join(work, "production", file));
     assert.deepEqual(fs.readFileSync(path.join(work, "production", file)), fs.readFileSync(path.join(root, file)));
+  }
+  const manifestPath = path.join(work, "production/manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  if (scenario === "dynamic-version") {
+    manifest.version = "8.7.6";
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
   }
   const settings = path.join(work, "home/.local/state/omarchy/settings");
   fs.mkdirSync(settings, { recursive: true });
@@ -106,6 +112,7 @@ fs.writeFileSync(destination, JSON.stringify(state));
     QT_QPA_PLATFORM: "offscreen", QT_QUICK_BACKEND: "software", QSG_RHI_BACKEND: "software",
     TZ: "UTC", LANG: "C.UTF-8", LC_ALL: "C.UTF-8",
     WEATHER_E2E_SERVER: address, WEATHER_E2E_SCENARIO: scenario,
+    WEATHER_E2E_VERSION: manifest.version,
   };
 }
 
@@ -165,6 +172,17 @@ async function runScenario(scenario) {
         if (!next.inspect) plan = next;
         if (next.locationFile) setLocationFixture(next.locationFile);
         if (next.locationHelper) fs.writeFileSync(path.join(work, "location-helper-mode"), next.locationHelper);
+        if (next.versionHelper) fs.writeFileSync(path.join(work, "version-helper-mode"), next.versionHelper);
+        if (next.manifest) {
+          const file = path.join(work, "production/manifest.json");
+          if (fs.existsSync(file)) fs.unlinkSync(file);
+          if (next.manifest.mode === "fifo") assert.equal(spawnSync("mkfifo", [file]).status, 0);
+          else if (next.manifest.mode === "malformed") fs.writeFileSync(file, "{");
+          else fs.writeFileSync(file, JSON.stringify({
+            ...JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8")),
+            version: next.manifest.version,
+          }));
+        }
         if (next.memory) {
           assert.ok(Number.isInteger(nativePid) && nativePid > 0, "No spawned native test PID");
           const status = fs.readFileSync(`/proc/${nativePid}/status`, "utf8");
@@ -256,11 +274,26 @@ async function runScenario(scenario) {
       fs.unlinkSync(path.join(work, "bin", "python3"));
       fs.writeFileSync(path.join(work, "bin", "python3"), `#!/usr/bin/python3
 import json, os, sys, time
-if sys.argv[3] == "read-location":
+if sys.argv[3] in ("read-location", "read-version"):
     os.execv("/usr/bin/python3", ["/usr/bin/python3"] + sys.argv[1:])
 with open("helpers.jsonl", "a") as log:
     log.write(json.dumps({"pid": os.getpid(), "operation": sys.argv[3]}) + "\\n")
 time.sleep(60)
+`, { mode: 0o700 });
+    }
+    if (scenario === "version-timeout") {
+      fs.writeFileSync(path.join(work, "version-helper-mode"), "hang");
+      fs.unlinkSync(path.join(work, "bin", "python3"));
+      fs.writeFileSync(path.join(work, "bin", "python3"), `#!/usr/bin/python3
+import json, os, sys, time
+if sys.argv[3] == "read-version":
+    with open("version-helper-mode") as mode_file:
+        mode = mode_file.read()
+    if mode == "hang":
+        with open("helpers.jsonl", "a") as log:
+            log.write(json.dumps({"pid": os.getpid()}) + "\\n")
+        time.sleep(60)
+os.execv("/usr/bin/python3", ["/usr/bin/python3"] + sys.argv[1:])
 `, { mode: 0o700 });
     }
     if (scenario.startsWith("unsafe-location-")) {
@@ -418,7 +451,7 @@ os.execv("/usr/bin/python3", ["/usr/bin/python3"] + sys.argv[1:])
     }
     assert.doesNotMatch(output, /^\s*ERROR\b/m, output);
     assert.doesNotMatch(output, /WEATHER_E2E_FAIL|ReferenceError|TypeError|Unable to assign|Cannot assign|Binding loop/i, output);
-    if (scenario === "helper-timeout" || scenario === "location-timeout" || scenario === "location-race") {
+    if (scenario === "helper-timeout" || scenario === "location-timeout" || scenario === "location-race" || scenario === "version-timeout") {
       const helpers = fs.readFileSync(path.join(work, "helpers.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
       if (scenario === "helper-timeout") {
         assert.ok(helpers.some(helper => helper.operation === "read"));
@@ -447,6 +480,16 @@ os.execv("/usr/bin/python3", ["/usr/bin/python3"] + sys.argv[1:])
 test("native QML startup and IP auto-location stay loopback-only", async () => {
   const { requests } = await runScenario("auto");
   assert.ok(requests.some(request => request.kind === "location"));
+});
+
+test("native QML version label follows only manifest changes on startup and popup reopen", async () => {
+  const { output } = await runScenario("dynamic-version");
+  assert.match(output, /Weather version load failed/);
+});
+
+test("native QML version read timeout leaves weather usable and recovers on reopen", async () => {
+  const { output } = await runScenario("version-timeout");
+  assert.match(output, /Weather version load failed: helper did not finish within 5 seconds/);
 });
 
 test("native QML rejects unsafe saved-location files and recovers through bounded polling", async () => {

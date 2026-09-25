@@ -27,7 +27,7 @@ function run(operation, file, input) {
 function rejected(result) {
   assert.equal(result.status, 1);
   assert.equal(result.stdout.length, 0, "rejected files must emit no content to QML");
-  assert.match(result.stderr.toString(), /Weather (cache|location) .* failed/);
+  assert.match(result.stderr.toString(), /Weather (cache|location|version) .* failed/);
 }
 
 function pythonCheck(work, code) {
@@ -65,6 +65,45 @@ test("location reader applies a fixed 16 KiB byte budget before emitting content
   rejected(run("read-location", file));
   fs.truncateSync(file, 1024 * 1024 * 1024);
   rejected(run("read-location", file));
+});
+
+test("version reader follows manifest changes without a second version constant", t => {
+  const { file } = fixture(t);
+  const manifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../manifest.json"), "utf8"));
+  for (const version of [manifest.version, "2.0.0", "10.12.34-beta.2"]) {
+    fs.writeFileSync(file, JSON.stringify({ ...manifest, version }));
+    const result = run("read-version", file);
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.toString(), version);
+  }
+});
+
+test("version reader rejects unsafe files, oversized manifests and invalid metadata", t => {
+  const { work, file } = fixture(t);
+  const manifest = { id: "io.github.daniellopez12.just-right-weather", version: "9.8.7" };
+  assert.equal(run("read-version", file).status, 3);
+  for (const data of ["{", "null", "[]", "{}", JSON.stringify({ ...manifest, id: "other.plugin" }),
+    ...[null, 7, "", " ", "1.0\n7", "x".repeat(65)].map(version => JSON.stringify({ ...manifest, version }))]) {
+    fs.writeFileSync(file, data);
+    rejected(run("read-version", file));
+  }
+  const data = JSON.stringify(manifest);
+  fs.writeFileSync(file, data.padEnd(16 * 1024, " "));
+  assert.equal(run("read-version", file).stdout.toString(), "9.8.7");
+  fs.appendFileSync(file, " ");
+  rejected(run("read-version", file));
+  fs.unlinkSync(file);
+  const target = path.join(work, "unrelated.json");
+  fs.writeFileSync(target, data);
+  fs.symlinkSync(target, file);
+  rejected(run("read-version", file));
+  fs.unlinkSync(file);
+  assert.equal(spawnSync("mkfifo", [file]).status, 0);
+  rejected(run("read-version", file));
+  fs.unlinkSync(file);
+  fs.mkdirSync(file);
+  rejected(run("read-version", file));
+  assert.equal(fs.readFileSync(target, "utf8"), data);
 });
 
 test("location reader rejects symlinks, FIFOs, directories and redirected parents without output", t => {
