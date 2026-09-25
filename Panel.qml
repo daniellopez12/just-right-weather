@@ -29,14 +29,14 @@ Panel {
     openedFromHotkey = false
     setCenterHoverRevealSuppressed(false)
     root.controller.show()
-    locationFile.reload()
+    reloadConfiguredLocation()
     root.refresh()
   }
 
   function openFromHotkey() {
     openedFromHotkey = true
     root.controller.show()
-    locationFile.reload()
+    reloadConfiguredLocation()
     root.refresh()
     // Set after showing, not before: showing hands the popout coordinator
     // over, which closes whichever panel was open, and that close clears the
@@ -211,7 +211,7 @@ Panel {
   // Configured location, read from the weather.json state file (owned by
   // omarchy-weather-location). The query is the wttr.in path segment
   // (coordinates when stored, else the encoded name); empty means IP
-  // auto-detect. The watch makes hand edits take effect live.
+  // auto-detect. Bounded polling detects edits without a FileView content read.
   property var configuredLocationState: ({ name: "", latitude: null, longitude: null })
   readonly property string configuredLocation: configuredLocationState.name
   readonly property string locationQuery: Model.wttrLocationQuery(configuredLocationState.name, configuredLocationState.latitude, configuredLocationState.longitude)
@@ -232,29 +232,92 @@ Panel {
     Qt.callLater(refresh)
   }
 
-  property FileView locationFile: FileView {
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/weather.json"
-    watchChanges: true
-    printErrors: false
-    onFileChanged: reload()
-    onLoaded: root.loadConfiguredLocation(text())
-    onLoadFailed: root.loadConfiguredLocation("")
+  property bool locationReadInFlight: false
+  property bool locationReadPending: false
+  property int locationReadGeneration: 0
+
+  function reloadConfiguredLocation() {
+    locationReadGeneration++
+    locationReadPending = true
+    startLocationRead()
+  }
+
+  function startLocationRead() {
+    if (!locationReadPending || locationReadInFlight || locationReadProc.running || locationSaveProc.running) return
+    locationReadPending = false
+    locationReadInFlight = true
+    locationReadProc.generation = locationReadGeneration
+    locationReadDeadline.restart()
+    locationReadProc.running = true
+  }
+
+  function finishLocationRead(ready) {
+    locationReadInFlight = false
+    locationReadDeadline.stop()
+    if (ready) locationReady = true
+    Qt.callLater(initializeWeather)
+    Qt.callLater(startLocationRead)
+  }
+
+  Process {
+    id: locationReadProc
+    property int generation: 0
+    command: ["python3", "-I", root.cacheHelperPath, "read-location",
+      Quickshell.env("HOME") + "/.local/state/omarchy/settings/weather.json"]
+    stdout: StdioCollector {
+      id: locationReadOutput
+      waitForEnd: true
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (!root.locationReadInFlight) {
+        Qt.callLater(root.startLocationRead)
+        return
+      }
+      if (generation === root.locationReadGeneration) {
+        try {
+          if (exitCode === 3 && exitStatus === 0) root.loadConfiguredLocation("")
+          else root.loadConfiguredLocation(Network.responseText(locationReadOutput.text, exitCode, exitStatus, 16 * 1024))
+        } catch (e) {
+          console.warn("Weather location load failed: " + e)
+        }
+      }
+      root.finishLocationRead(generation === root.locationReadGeneration)
+    }
+  }
+
+  Timer {
+    id: locationReadDeadline
+    interval: 5000
+    onTriggered: {
+      console.warn("Weather location load failed: helper did not finish within 5 seconds")
+      if (locationReadProc.running) locationReadProc.signal(9)
+      root.finishLocationRead(true)
+    }
   }
 
   function loadConfiguredLocation(text) {
+    if (text) {
+      var data = JSON.parse(text)
+      if (!data || typeof data !== "object" || Array.isArray(data))
+        throw new Error("Invalid saved location")
+    }
     configuredLocationState = Model.parseLocationFile(text)
     locationReady = true
     Qt.callLater(initializeWeather)
   }
 
-  // The first read can race shell startup (observed sporadically), leaving a
-  // stored location unhonored until the next file write. One delayed reload
-  // self-corrects; if the first read was fine it's a no-op, since identical
-  // state doesn't change locationQuery and so triggers no refetch.
+  Component.onCompleted: reloadConfiguredLocation()
+
+  // Only one read may run at a time. Opening or saving also requests a read;
+  // its generation prevents an older in-flight result from undoing a save.
   Timer {
-    interval: 1500
+    interval: 2000
     running: true
-    onTriggered: locationFile.reload()
+    repeat: true
+    onTriggered: {
+      if (!root.locationReadInFlight && !locationSaveProc.running)
+        root.reloadConfiguredLocation()
+    }
   }
 
   property int forecastRetries: 0
@@ -431,6 +494,7 @@ Panel {
   }
 
   function persistLocation(name, latitude, longitude) {
+    locationReadGeneration++
     if (name && latitude !== null && longitude !== null)
       locationSaveProc.command = ["omarchy-weather-location", "--set", name, latitude + "," + longitude]
     else if (name)
@@ -734,6 +798,7 @@ Panel {
   Process {
     id: locationSaveProc
     onExited: function(exitCode) {
+      root.reloadConfiguredLocation()
       if (exitCode !== 0) {
         root.savingLocation = false
         root.locationError = "Could not save the location. Please try again."
@@ -745,9 +810,7 @@ Panel {
         root.pendingLocation = null
       }
 
-      // FileView handles changed locations. Explicitly refresh here too so
-      // saving the already-active location cannot strand the spinner.
-      locationFile.reload()
+      // Re-saving the already-active location must not strand the spinner.
       if (!root.savingLocationQueryStarted) {
         root.savingLocationQueryStarted = true
         root.forecastRetries = 0

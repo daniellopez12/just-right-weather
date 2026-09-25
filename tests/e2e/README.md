@@ -8,7 +8,7 @@ node --test tests/qml-network.test.cjs
 
 Requires Linux, Node.js (the built-in test runner), and
 `/usr/bin/{quickshell,curl,python3}` with Qt Quick and its offscreen platform
-plugin. The suite takes approximately 90 seconds. Missing prerequisites
+plugin. The suite takes approximately two to three minutes. Missing prerequisites
 fail explicitly rather than silently skipping native coverage.
 
 ## What runs
@@ -17,7 +17,7 @@ The runner starts the actual Quickshell executable with an offscreen Qt Quick
 window. `Panel.qml`, `HourlyForecast.qml`, `Model.js`, `Network.js`, and `Cache.py` are copied
 **byte-for-byte** from the current working tree and verified against the originals.
 The complete production component, render tree, `Process`, `StdioCollector`,
-`FileView`, loaders, bindings, and timers run natively. There are no extracted
+loaders, bindings, and timers run natively. There are no extracted
 handlers, injected production aliases/hooks, response-budget overrides, or
 shortened retry/debounce timers.
 
@@ -34,6 +34,14 @@ Covered scenarios:
   native hourly scrolling.
 - City and ZIP searches, persistence, completion only after the matching weather
   provider succeeds, re-saving the unchanged pin, and clearing back to auto.
+- Saved-location startup rejects symlinks to unrelated valid location JSON,
+  writerless FIFOs, sparse 1 GiB files, directories, redirected parents and
+  malformed JSON. The editor/heartbeat remain responsive and bounded polling
+  recovers after repair without changing unrelated targets. In-session edits,
+  atomic replacement, deletion/recreation and popup-triggered reloads are
+  exercised; failed reads retain the last valid pin. A stalled location helper
+  is killed within the production five-second deadline, startup unblocks, and
+  a later read recovers. A delayed old read cannot undo a newer saved pin.
 - Real curl HTTP errors (22), size errors (63), truncated transfers (18) whose
   received prefix is valid JSON, malformed JSON, and chunked oversized bodies.
   Last-good reports/freshness remain intact, stale status is displayed, both
@@ -114,8 +122,10 @@ curlrc/proxies and external network configuration are not imported. The Linux
 keeping Quickshell's isolated IPC socket below the Unix socket path limit.
 
 The PATH includes the real Python 3 interpreter for the unmodified cache helper.
-Only the watchdog scenario substitutes an inert, hanging process for that
-interpreter, and verifies that every spawned helper has been terminated.
+The watchdog scenarios selectively substitute hanging processes for the
+interpreter, and verify that every spawned stalled helper has been terminated.
+The location-race scenario delays output from a real bounded helper read so a
+new save can overtake it; production QML and helper files remain unchanged.
 The PATH's curl wrapper whitelists production weather hosts, rewrites **only**
 the URL to a loopback server, then `exec`s real curl with the original flags,
 timeouts and response-size limits. The server verifies every endpoint budget.

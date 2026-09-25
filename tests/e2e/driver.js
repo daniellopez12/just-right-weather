@@ -265,9 +265,8 @@ function racesScenario() {
     })
     action("start old weather refresh", function() { h.panel.refresh() })
     pause(200)
-    action("change configured coordinates in flight", function() {
-        h.panel.configuredLocationState = { name: "New Pin", latitude: 43, longitude: -78 }
-    })
+    control({ inspect: true, locationFile: { value: { name: "New Pin", latitude: 43, longitude: -78 } } })
+    action("reload changed configured coordinates in flight", function() { h.panel.reloadConfiguredLocation() })
     until("new location weather finishes", function() {
         return h.panel.hourlyLocationQuery === "43,-78" && h.panel.dailyForecastReport.fixture === "replacement"
     })
@@ -382,6 +381,14 @@ function schemaScenario() {
 
 function start(harness) {
     h = harness
+    if (h.scenario.indexOf("unsafe-location-") === 0) {
+        unsafeLocationScenario()
+        return
+    }
+    if (h.scenario === "location-timeout") {
+        locationTimeoutScenario()
+        return
+    }
     if (h.scenario.indexOf("auto-cache-") === 0) {
         autoCacheRestartScenario()
         return
@@ -417,6 +424,8 @@ function start(harness) {
     else if (h.scenario === "memory") memoryScenario()
     else if (h.scenario === "schema") schemaScenario()
     else if (h.scenario === "timeouts") timeoutsScenario()
+    else if (h.scenario === "location-reloads") locationReloadsScenario()
+    else if (h.scenario === "location-race") locationRaceScenario()
     else if (h.scenario === "auto-refresh" || h.scenario === "auto-refresh-interrupted") autoRefreshScenario()
     else if (h.scenario === "cache" || h.scenario === "cache-write-error" || h.scenario === "auto-cache") {
         until("native cache writes settle", function() {
@@ -426,6 +435,107 @@ function start(harness) {
             check(h.panel.reportTempNum === (h.scenario === "auto-cache" ? "21" : "23") && h.panel.hourlyEntries.length >= 48, "current and hourly weather remain visible")
         })
     }
+}
+
+function unsafeLocationScenario() {
+    var ticks
+    action("start with an unsafe location file", function() {
+        ticks = h.ticks
+        h.loadPanel()
+    })
+    until("unsafe location cannot block initialization", function() {
+        return h.panel && h.panel.weatherReady
+    }, 2000)
+    action("unsafe contents never enter location or weather state", function() {
+        check(h.panel.locationQuery === "" && h.panel.configuredLocation === "", "unrelated coordinates are not applied")
+        check(h.panel.report === null, "startup completes before delayed network responses")
+        h.panel.startEditingLocation()
+        check(h.panel.editingLocation, "editor responds after rejected read")
+        h.panel.cancelEditingLocation()
+    })
+    until("live weather works without saved coordinates", function() {
+        return h.panel.report && h.panel.dailyForecastReport && networkIdle()
+    })
+    action("QML remains responsive", function() { check(h.ticks - ticks > 10, "native heartbeat continues") })
+    control({ locationFile: { value: { name: "Recovered pin", latitude: 44, longitude: -79 } } })
+    until("bounded polling finds repaired location without opening popup", function() {
+        return h.panel.configuredLocation === "Recovered pin" && h.panel.hourlyLocationQuery === "44,-79"
+    }, 4000)
+    action("repaired saved location drives live weather", function() {
+        check(h.panel.hasConfiguredCoordinates && h.panel.hourlyEntries.length >= 48, "forecast follows repaired pin")
+    })
+}
+
+function locationReloadsScenario() {
+    control({ locationFile: { value: { name: "Edited pin", latitude: 42, longitude: -73 } } })
+    until("external edit is detected", function() { return h.panel.hourlyLocationQuery === "42,-73" }, 4000)
+    control({ locationFile: { mode: "atomic", value: { name: "Atomic pin", latitude: 43, longitude: -74 } } })
+    until("atomic replacement is detected", function() { return h.panel.hourlyLocationQuery === "43,-74" }, 4000)
+    control({ locationFile: { mode: "fifo" } })
+    pause(2200)
+    action("failed read preserves last valid pin", function() {
+        check(h.panel.locationQuery === "43,-74" && h.panel.configuredLocation === "Atomic pin", "unsafe replacement does not silently switch location")
+        check(!h.panel.locationReadInFlight, "writerless FIFO does not block")
+    })
+    control({ locationFile: { mode: "malformed" } })
+    action("opening normally requests a safe reload", function() { h.panel.open() })
+    pause(150)
+    action("malformed replacement preserves pin", function() { check(h.panel.locationQuery === "43,-74", "bad JSON is not applied") })
+    control({ locationFile: { mode: "missing" } })
+    action("hotkey opening requests a safe reload", function() { h.panel.openFromHotkey() })
+    until("deleted preference returns to IP detection", function() { return h.panel.locationQuery === "" && h.panel.reportIsLive })
+    control({ locationFile: { value: { name: "Recreated pin", latitude: 45, longitude: -75 } } })
+    until("recreated file is detected without a watch", function() { return h.panel.hourlyLocationQuery === "45,-75" }, 4000)
+    action("recreated state is rendered", function() { check(h.panel.configuredLocation === "Recreated pin", "new name applied") })
+}
+
+function locationTimeoutScenario() {
+    var ticks
+    var started
+    action("load while location reader hangs", function() {
+        ticks = h.ticks
+        started = Date.now()
+        h.loadPanel()
+    })
+    pause(200)
+    action("editor is usable during startup read", function() {
+        check(!h.panel.weatherReady && h.panel.locationReadInFlight, "initial location request is pending")
+        h.panel.startEditingLocation()
+        check(h.panel.editingLocation, "editor responds before timeout")
+        h.panel.cancelEditingLocation()
+    })
+    until("location watchdog unblocks startup", function() { return h.panel.weatherReady }, 6500)
+    action("read deadline is bounded and event loop never blocks", function() {
+        check(Date.now() - started >= 4800 && Date.now() - started < 6200, "production five-second deadline enforced")
+        check(h.ticks - ticks > 100, "native heartbeat continued")
+        check(h.panel.locationQuery === "", "hung reader supplies no pin")
+    })
+    control({ locationHelper: "normal" })
+    until("a later safe read recovers configured weather", function() {
+        return h.panel.locationQuery === "40,-75" && h.panel.hourlyLocationQuery === "40,-75"
+            && !h.panel.locationReadInFlight
+    }, 4000)
+    action("recovery preserves responsive weather", function() { check(h.panel.hourlyEntries.length >= 48, "hourly weather recovers") })
+}
+
+function locationRaceScenario() {
+    until("initial safe location read is idle", function() { return !h.panel.locationReadInFlight })
+    control({ inspect: true, locationHelper: "delay" })
+    action("start a delayed read of the old pin", function() { h.panel.reloadConfiguredLocation() })
+    pause(200)
+    action("save a new pin before the old read completes", function() {
+        check(h.panel.locationReadInFlight, "old read remains in flight")
+        h.panel.pickSuggestion({ name: "New saved pin", latitude: 46, longitude: -76 })
+    })
+    until("new saved pin applied", function() { return h.panel.locationQuery === "46,-76" })
+    control({ inspect: true, locationHelper: "normal" })
+    until("obsolete read exits and pending reload completes", function() {
+        check(h.panel.locationQuery === "46,-76", "old captured location must never undo save")
+        return !h.panel.locationReadInFlight && !h.panel.locationReadPending && networkIdle()
+    })
+    action("only saved coordinates reach final forecast", function() {
+        check(h.panel.hourlyLocationQuery === "46,-76" && !h.panel.savingLocation, "new pin's save completes")
+    })
 }
 
 function helperTimeoutScenario() {

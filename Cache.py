@@ -1,4 +1,4 @@
-"""Bounded cache I/O for the weather panel; stdout contains only accepted data."""
+"""Bounded weather file I/O; stdout contains only accepted data."""
 
 import os
 import secrets
@@ -6,21 +6,22 @@ import stat
 import sys
 
 MAX_BYTES = 512 * 1024
+LOCATION_MAX_BYTES = 16 * 1024
 MISSING = 3
 
 
-def read_cache(directory, name):
+def read_cache(directory, name, max_bytes=MAX_BYTES):
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
     with os.fdopen(fd, "rb") as source:
         info = os.fstat(source.fileno())
         if not stat.S_ISREG(info.st_mode):
-            raise ValueError("Cache is not a regular file")
-        if info.st_size > MAX_BYTES:
-            raise ValueError("Cache exceeds 512 KiB")
+            raise ValueError("File is not a regular file")
+        if info.st_size > max_bytes:
+            raise ValueError("File exceeds " + str(max_bytes) + " bytes")
         # Keep the read bounded even if the file grows after fstat().
-        data = source.read(MAX_BYTES + 1)
-        if len(data) > MAX_BYTES:
-            raise ValueError("Cache exceeds 512 KiB")
+        data = source.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError("File exceeds " + str(max_bytes) + " bytes")
         return data
 
 
@@ -42,10 +43,11 @@ def write_cache(directory, name, data):
 
 
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in ("read", "write"):
-        print("Usage: Cache.py read|write PATH", file=sys.stderr)
+    if len(sys.argv) != 3 or sys.argv[1] not in ("read", "read-location", "write"):
+        print("Usage: Cache.py read|read-location|write PATH", file=sys.stderr)
         return 1
     operation, path = sys.argv[1:]
+    description = "Weather location read" if operation == "read-location" else "Weather cache " + operation
     try:
         if operation == "write":
             data = sys.stdin.buffer.read(MAX_BYTES + 1)
@@ -56,19 +58,20 @@ def main():
             os.makedirs(parent, mode=0o700, exist_ok=True)
         directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            if operation == "read":
-                sys.stdout.buffer.write(read_cache(directory, name))
+            if operation != "write":
+                max_bytes = LOCATION_MAX_BYTES if operation == "read-location" else MAX_BYTES
+                sys.stdout.buffer.write(read_cache(directory, name, max_bytes))
             else:
                 write_cache(directory, name, data)
         finally:
             os.close(directory)
     except FileNotFoundError as error:
-        if operation == "read":
+        if operation != "write":
             return MISSING
         print("Weather cache write failed: " + str(error), file=sys.stderr)
         return 1
     except (OSError, ValueError) as error:
-        print("Weather cache " + operation + " failed: " + str(error), file=sys.stderr)
+        print(description + " failed: " + str(error), file=sys.stderr)
         return 1
     return 0
 

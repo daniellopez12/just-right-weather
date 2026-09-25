@@ -27,7 +27,7 @@ function run(operation, file, input) {
 function rejected(result) {
   assert.equal(result.status, 1);
   assert.equal(result.stdout.length, 0, "rejected files must emit no content to QML");
-  assert.match(result.stderr.toString(), /Weather cache .* failed/);
+  assert.match(result.stderr.toString(), /Weather (cache|location) .* failed/);
 }
 
 function pythonCheck(work, code) {
@@ -54,6 +54,61 @@ test("cache helper round-trips UTF-8 bytes through atomic private writes", t => 
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.deepEqual(fs.readdirSync(directory), ["forecast.json"]);
   assert.equal(run("write", file, data).status, 0, "identical-content writes finish normally");
+});
+
+test("location reader applies a fixed 16 KiB byte budget before emitting content", t => {
+  const { file } = fixture(t);
+  const data = Buffer.from("\u00e9".repeat(8192));
+  fs.writeFileSync(file, data);
+  assert.deepEqual(run("read-location", file).stdout, data);
+  fs.appendFileSync(file, "x");
+  rejected(run("read-location", file));
+  fs.truncateSync(file, 1024 * 1024 * 1024);
+  rejected(run("read-location", file));
+});
+
+test("location reader rejects symlinks, FIFOs, directories and redirected parents without output", t => {
+  const { work, file, directory } = fixture(t);
+  assert.equal(run("read-location", file).status, 3);
+  const unrelated = path.join(work, "unrelated");
+  fs.writeFileSync(unrelated, '{"name":"Private pin","latitude":42,"longitude":-73}');
+  fs.symlinkSync(unrelated, file);
+  rejected(run("read-location", file));
+  fs.unlinkSync(file);
+  assert.equal(spawnSync("mkfifo", [file]).status, 0);
+  rejected(run("read-location", file));
+  fs.unlinkSync(file);
+  fs.mkdirSync(file);
+  rejected(run("read-location", file));
+  fs.rmdirSync(file);
+  fs.rmdirSync(directory);
+  fs.symlinkSync(work, directory);
+  rejected(run("read-location", file));
+  assert.equal(fs.readFileSync(unrelated, "utf8"), '{"name":"Private pin","latitude":42,"longitude":-73}');
+});
+
+test("location reader rejects growth past 16 KiB after fstat", t => {
+  const { work } = fixture(t);
+  pythonCheck(work, `
+file = os.path.join(work, "weather.json")
+with open(file, "wb") as output:
+    output.write(b"{}")
+original_fstat = os.fstat
+def grow(fd):
+    info = original_fstat(fd)
+    with open(file, "ab") as output:
+        output.write(b"x" * cache["LOCATION_MAX_BYTES"])
+    return info
+directory = os.open(work, os.O_RDONLY | os.O_DIRECTORY)
+with patch("os.fstat", side_effect=grow):
+    try:
+        cache["read_cache"](directory, "weather.json", cache["LOCATION_MAX_BYTES"])
+    except ValueError as error:
+        assert "exceeds" in str(error)
+    else:
+        raise AssertionError("Location growth escaped its limit")
+os.close(directory)
+`);
 });
 
 test("cache helper reports missing files separately from failures", t => {

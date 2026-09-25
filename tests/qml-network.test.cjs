@@ -118,6 +118,41 @@ async function runScenario(scenario) {
   const requests = [];
   const memorySamples = [];
   const cacheSnapshots = [];
+  const locationPath = path.join(work, "home/.local/state/omarchy/settings/weather.json");
+  const unrelatedLocation = path.join(work, "unrelated-location/weather.json");
+  const privateLocation = JSON.stringify({ name: "Unrelated private pin", latitude: 66, longitude: 77 });
+  function setLocationFixture(options) {
+    const directory = path.dirname(locationPath);
+    if (fs.lstatSync(directory).isSymbolicLink()) {
+      fs.unlinkSync(directory);
+      fs.mkdirSync(directory);
+    }
+    if (options.mode !== "atomic" && fs.lstatSync(locationPath, { throwIfNoEntry: false })) {
+      if (fs.lstatSync(locationPath).isDirectory()) fs.rmdirSync(locationPath);
+      else fs.unlinkSync(locationPath);
+    }
+    if (options.mode === "missing") return;
+    if (options.mode === "symlink" || options.mode === "redirected") {
+      fs.mkdirSync(path.dirname(unrelatedLocation), { recursive: true });
+      fs.writeFileSync(unrelatedLocation, privateLocation);
+      if (options.mode === "symlink") fs.symlinkSync(unrelatedLocation, locationPath);
+      else {
+        fs.rmdirSync(directory);
+        fs.symlinkSync(path.dirname(unrelatedLocation), directory);
+      }
+    } else if (options.mode === "fifo") {
+      assert.equal(spawnSync("mkfifo", [locationPath]).status, 0);
+    } else if (options.mode === "directory") fs.mkdirSync(locationPath);
+    else if (options.mode === "oversize") {
+      fs.writeFileSync(locationPath, "");
+      fs.truncateSync(locationPath, 1024 * 1024 * 1024);
+    } else if (options.mode === "malformed") fs.writeFileSync(locationPath, "{");
+    else {
+      const temporary = options.mode === "atomic" ? locationPath + ".new" : locationPath;
+      fs.writeFileSync(temporary, JSON.stringify(options.value));
+      if (options.mode === "atomic") fs.renameSync(temporary, locationPath);
+    }
+  }
   let nativePid;
   let plan = {};
   const server = http.createServer((request, response) => {
@@ -128,6 +163,8 @@ async function runScenario(scenario) {
       request.on("end", () => {
         const next = JSON.parse(body);
         if (!next.inspect) plan = next;
+        if (next.locationFile) setLocationFixture(next.locationFile);
+        if (next.locationHelper) fs.writeFileSync(path.join(work, "location-helper-mode"), next.locationHelper);
         if (next.memory) {
           assert.ok(Number.isInteger(nativePid) && nativePid > 0, "No spawned native test PID");
           const status = fs.readFileSync(`/proc/${nativePid}/status`, "utf8");
@@ -217,13 +254,39 @@ async function runScenario(scenario) {
     if (scenario === "helper-timeout") {
       plan = { fallback: { mode: "good", delay: 800 } };
       fs.unlinkSync(path.join(work, "bin", "python3"));
-      executable(path.join(work, "bin", "python3"), `
-const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(path.join(work, "helpers.jsonl"))},
-  JSON.stringify({ pid: process.pid, operation: process.argv[4] }) + "\\n");
-process.stdin.resume();
-setInterval(() => {}, 1000);
-`);
+      fs.writeFileSync(path.join(work, "bin", "python3"), `#!/usr/bin/python3
+import json, os, sys, time
+if sys.argv[3] == "read-location":
+    os.execv("/usr/bin/python3", ["/usr/bin/python3"] + sys.argv[1:])
+with open("helpers.jsonl", "a") as log:
+    log.write(json.dumps({"pid": os.getpid(), "operation": sys.argv[3]}) + "\\n")
+time.sleep(60)
+`, { mode: 0o700 });
+    }
+    if (scenario.startsWith("unsafe-location-")) {
+      setLocationFixture({ mode: scenario.slice("unsafe-location-".length) });
+      plan = { fallback: { mode: "good", delay: 800 } };
+    }
+    if (scenario === "location-timeout" || scenario === "location-race") {
+      fs.writeFileSync(path.join(work, "location-helper-mode"), scenario === "location-timeout" ? "hang" : "normal");
+      fs.unlinkSync(path.join(work, "bin", "python3"));
+      fs.writeFileSync(path.join(work, "bin", "python3"), `#!/usr/bin/python3
+import json, os, subprocess, sys, time
+if sys.argv[3] == "read-location":
+    with open("location-helper-mode") as mode_file:
+        mode = mode_file.read()
+    if mode != "normal":
+        with open("helpers.jsonl", "a") as log:
+            log.write(json.dumps({"pid": os.getpid(), "mode": mode}) + "\\n")
+        if mode == "hang":
+            time.sleep(60)
+        else:
+            result = subprocess.run(["/usr/bin/python3"] + sys.argv[1:], capture_output=True)
+            time.sleep(1)
+            sys.stdout.buffer.write(result.stdout)
+            sys.exit(result.returncode)
+os.execv("/usr/bin/python3", ["/usr/bin/python3"] + sys.argv[1:])
+`, { mode: 0o700 });
     }
     const phases = scenario === "cache" ? ["cache", "cache-offline", "cache-expired", "cache-report-expired", "cache-mismatch", "cache-corrupt"]
       : scenario === "unsafe-cache" ? ["unsafe-cache-symlink", "unsafe-cache-fifo", "unsafe-cache-oversize", "unsafe-cache-directory"]
@@ -355,13 +418,17 @@ setInterval(() => {}, 1000);
     }
     assert.doesNotMatch(output, /^\s*ERROR\b/m, output);
     assert.doesNotMatch(output, /WEATHER_E2E_FAIL|ReferenceError|TypeError|Unable to assign|Cannot assign|Binding loop/i, output);
-    if (scenario === "helper-timeout") {
+    if (scenario === "helper-timeout" || scenario === "location-timeout" || scenario === "location-race") {
       const helpers = fs.readFileSync(path.join(work, "helpers.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
-      assert.ok(helpers.some(helper => helper.operation === "read"));
-      assert.ok(helpers.some(helper => helper.operation === "write"));
+      if (scenario === "helper-timeout") {
+        assert.ok(helpers.some(helper => helper.operation === "read"));
+        assert.ok(helpers.some(helper => helper.operation === "write"));
+      } else assert.ok(helpers.length > 0);
       for (const helper of helpers)
         assert.throws(() => process.kill(helper.pid, 0), { code: "ESRCH" }, "Timed-out helper must no longer exist");
     }
+    if (fs.existsSync(unrelatedLocation))
+      assert.equal(fs.readFileSync(unrelatedLocation, "utf8"), privateLocation, "Location reader never modifies unrelated targets");
     assert.ok(requests.some(request => request.kind === "forecast"));
     assert.ok(requests.some(request => request.kind === "daily"));
     for (const passed of output.match(/WEATHER_E2E_PASS[^\n]+/g)) console.log(passed);
@@ -380,6 +447,27 @@ setInterval(() => {}, 1000);
 test("native QML startup and IP auto-location stay loopback-only", async () => {
   const { requests } = await runScenario("auto");
   assert.ok(requests.some(request => request.kind === "location"));
+});
+
+test("native QML rejects unsafe saved-location files and recovers through bounded polling", async () => {
+  for (const mode of ["symlink", "fifo", "oversize", "directory", "redirected", "malformed"]) {
+    const { output, state } = await runScenario("unsafe-location-" + mode);
+    assert.match(output, /Weather location load failed/);
+    assert.equal(state.name, "Recovered pin");
+  }
+});
+
+test("native QML saved-location polling handles edits, atomic replacement, missing files and invalid replacements", async () => {
+  await runScenario("location-reloads");
+});
+
+test("native QML saved-location watchdog bounds hung reads and recovers without blocking the editor", async () => {
+  const { output } = await runScenario("location-timeout");
+  assert.match(output, /Weather location load failed: helper did not finish within 5 seconds/);
+});
+
+test("native QML stale saved-location reads cannot undo a newer save or queued reload", async () => {
+  await runScenario("location-race");
 });
 
 test("native QML city, unchanged pin, ZIP saves and clearing complete", async () => {

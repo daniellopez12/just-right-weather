@@ -133,6 +133,21 @@ The plugin reuses your local
 is never bundled. Without a configured location, wttr.in estimates one from
 your public IP address.
 
+Saved-location reads use the same bundled Python helper as the forecast cache,
+with a separate **16 KiB** limit enforced before emitting content to the shell.
+The helper rejects symlinks, non-regular files and oversized files, checks the
+opened descriptor, and keeps reads bounded even if the file grows. A
+five-second watchdog ends a stalled read without blocking the UI or preventing
+weather initialization. Invalid or failed reads are logged and retain the last
+valid location; on first startup there is no saved pin to retain, so weather
+uses IP detection. A missing file explicitly returns to IP detection.
+
+Bounded polling every two seconds detects external edits, deletion and atomic
+replacement. Opening the popup or finishing a location save also requests a
+safe read. Reads are serialized and obsolete results cannot undo a newer save.
+The reader never writes or repairs the shared location file; explicit saves
+still use Omarchy's location command.
+
 The last successful provider payloads, their fetch timestamps, and a location
 query are stored locally in `$XDG_CACHE_HOME/just-right-weather/forecast.json`
 (default `~/.cache/just-right-weather/forecast.json`). This file includes location
@@ -196,6 +211,15 @@ omarchy plugin enable omarchy.weather --section center
 ```
 
 ## Release notes
+
+### 1.0.5 - Safe saved-location reads
+
+Removes the remaining `FileView` read of the shared `weather.json` location
+preference. Startup, popup opens, post-save reloads and external-edit detection
+all use bounded, no-follow, regular-file reads with a 16 KiB producer limit and
+a five-second deadline. Failed reads preserve the last valid pin, and delayed
+results cannot overwrite newer saves. External changes are detected by
+two-second polling. Forecast-cache protections from 1.0.4 are unchanged.
 
 ### 1.0.4 - Safe, bounded cache I/O
 
@@ -279,6 +303,8 @@ Editing the original submission issue does not publish a verified update.
    Choose **Verify and publish a newer upstream commit**, enter plugin ID
    `io.github.daniellopez12.just-right-weather`, this repository's URL, and the
    exact target SHA, then complete the verification acknowledgment.
+   Keep the form's headings and order exactly as generated; put implementation
+   details and test evidence in a separate comment, not extra body sections.
 3. Wait for validation and any required maintainer review/promotion. Confirm the
    marketplace's verified commit matches the intended release. Further commits
    require another update request; pushing alone does not extend verification.
